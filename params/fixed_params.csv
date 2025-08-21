@@ -1,0 +1,7 @@
+﻿name,value,description
+stimulus,stim_05-08-23,name of stimulus file (ends in .mat)
+corr_thre,0.1,lower bound on trial-to-trial correlation which is used to define reliably responsive neurons
+n_procs,20,"dimension of the subspace projection, used for equivariance model"
+n_neurons,250,number of neurons to sample in each layer
+n_max,100,maximum number of neuron sampling
+inv_snr,3.9,"inverse signal-to-noise ratio, used for modeling trial-to-trial variability in artificial neurons"

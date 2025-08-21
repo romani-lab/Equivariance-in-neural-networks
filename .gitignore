@@ -1,0 +1,17 @@
+# Created by https://www.toptal.com/developers/gitignore/api/python,dotenv,visualstudiocode,macos,windows,linux,jupyternotebooks,r
+# Edit at https://www.toptal.com/developers/gitignore?templates=python,dotenv,visualstudiocode,macos,windows,linux,jupyternotebooks,r
+
+# Byte-compiled / optimized / DLL files
+**/__pycache__/
+
+### JupyterNotebooks ###
+# gitignore template for Jupyter Notebooks
+# website: http://jupyter.org/
+
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+### private files not to share on github
+private/
+cache/
+results/
