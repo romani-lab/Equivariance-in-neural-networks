@@ -1,15 +1,132 @@
 import numpy as np
-import pickle as pkl
 import pandas as pd
+from math import factorial
 from scipy.linalg import logm
 from scipy.stats import wilcoxon
 from scipy.stats import zscore 
+from sklearn.metrics import roc_auc_score
+
+
+def calculate_rel_center_dist(x):
+    """
+    Calculate relative center distance.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        neural responses of shape (n_neurons, 2, n_rot)
+
+    Returns
+    -------
+    rel_center : float
+        relative center distance
+    """
+    norm = np.linalg.norm(x - x.mean(axis=2, keepdims=True), axis=0).mean()
+    rel_center = np.linalg.norm(x[:,0].mean(1) - x[:,1].mean(1)) / norm
+
+    return rel_center
+
+
+def calculate_norm_dists(x):
+    """
+    Calculate normalized distance to center.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        neural responses of shape (n_neurons, n_stim, n_rot)
+
+    Returns
+    -------
+    norm_dist_mean : float
+        mean normalized distance to center
+    norm_dist_std : float
+        std of normalized distance to center
+    """
+    n_neurons = x.shape[0]
+    center = x.mean(axis=2, keepdims=True)
+
+    norm_dist_mean = np.linalg.norm(x - center, axis=0).mean() / np.sqrt(n_neurons)
+    norm_dist_std = np.sqrt((np.linalg.norm(x - center, axis=0).std(axis=1)**2).mean()) / np.sqrt(n_neurons)
+
+    return norm_dist_mean, norm_dist_std
+
+
+def calculate_effect_size(df):
+    """
+    Calculate effect size statistics between two paired samples in df.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing the paired samples with columns "score_1" and "score_2"
+
+    Returns
+    -------
+    results_df : pd.DataFrame
+        DataFrame containing the effect size statistics:
+        - mean_delta: mean difference between score_1 and score_2
+        - d_paired: Cohen's d for paired samples
+        - delta_ci_low: lower bound of 95% confidence interval for mean difference
+        - delta_ci_high: upper bound of 95% confidence interval for mean difference
+        - auc: Area Under the Curve (AUC) for the two scores
+        - auc_ci_low: lower bound of 95% confidence interval for AUC
+        - auc_ci_high: upper bound of 95% confidence interval for AUC
+    """
+    delta = df["score_1"] - df["score_2"]
+
+    mean_delta = delta.mean()
+    sd_delta = delta.std(ddof=1)
+    d_paired = mean_delta / sd_delta
+
+    rng = np.random.default_rng(0)
+    n_boot = 10000
+    boot_means = np.empty(n_boot)
+    for i in range(n_boot):
+        sample = rng.choice(delta, size=len(delta), replace=True)
+        boot_means[i] = sample.mean()
+    ci_low, ci_high = np.percentile(boot_means, [2.5, 97.5])
+
+    scores = np.concatenate([-df["score_1"].values, -df["score_2"].values])
+    labels = np.concatenate([
+        np.zeros(len(df)),
+        np.ones(len(df))
+    ])
+    auc = roc_auc_score(labels, scores)
+
+    n = len(df)
+    boot_auc = np.empty(n_boot)
+    for i in range(n_boot):
+        idx = rng.choice(n, size=n, replace=True)
+        scores_b = np.concatenate([
+            -df["score_1"].values[idx],
+            -df["score_2"].values[idx]
+        ])
+        labels_b = np.concatenate([
+            np.zeros(n),
+            np.ones(n)
+        ])
+        boot_auc[i] = roc_auc_score(labels_b, scores_b)
+    auc_ci_low, auc_ci_high = np.percentile(boot_auc, [2.5, 97.5])
+
+    results_df = pd.DataFrame({
+        "mean_delta": [mean_delta],
+        "d_paired": [d_paired],
+        "delta_ci_low": [ci_low],
+        "delta_ci_high": [ci_high],
+        "auc": [auc],
+        "auc_ci_low": [auc_ci_low],
+        "auc_ci_high": [auc_ci_high]
+    })
+
+    return results_df
 
 
 def calculate_cc_norm(x, x_pred, cc_max, tol=1e-6):
     """
-    Calculate normalized correlation coefficient as defined in     
+    Calculate normalized correlation coefficient across last dimension, as defined in     
     https://www.frontiersin.org/journals/computational-neuroscience/articles/10.3389/fncom.2016.00010/full
+    If cc_max is 1, this reduces to the standard Pearson correlation coefficient
 
     Parameters
     ----------
@@ -20,7 +137,7 @@ def calculate_cc_norm(x, x_pred, cc_max, tol=1e-6):
     cc_max : np.ndarray
         maximum correlation coefficient of shape (n_neurons, n_stim)
     tol : float, default=1e-6
-        tolerance for standard deviation, below which the neuron gets a cc_norm of NaN
+        tolerance for max. standard deviation across rotations, below which the neuron gets a cc_norm of NaN
 
     Returns
     -------
@@ -45,24 +162,22 @@ def calculate_cc_norm(x, x_pred, cc_max, tol=1e-6):
     return cc_norm
 
 
-def compute_significance(results_df, results_f, alternative='greater'):
+def compute_significance(results_df, alternative='greater'):
     """
     Compute one-sided pairwise Wilcoxon signed-rank test statistics and 
-    p-values for the given results_df and save the results to a CSV file results_f.
-    Compare putative lower to higher-order areas.
+    p-values for the given results_df.
     
     Parameters
     ----------
     results_df : pd.DataFrame
         DataFrame containing the results with columns 'area' and 'score'.
-    results_f : str
-        path to save the results.
     alternative : str, default='greater'
         Defines the one-sidedness of the alternative hypothesis.
 
     Returns
     -------
-    None
+    pd.DataFrame
+        DataFrame containing the Wilcoxon signed-rank test statistics and p-values.
     """
     stat_df = pd.DataFrame()
 
@@ -104,41 +219,40 @@ def compute_significance(results_df, results_f, alternative='greater'):
             stat_df = pd.concat([stat_df, tmp_df], axis=0)
 
     stat_df.reset_index(drop=True, inplace=True)
-    stat_df.to_csv(results_f, index=False)
+
+    return stat_df
 
 
-def find_eigendecomp(rot, n_rot, tol=1e-10):
+def find_eigendecomp(rot, tol=1e-10):
     """
     Find the real eigenphases and eigenvectors of the rotation matrix rot.
-    The eigenphases are give in units of 2*np.pi/n_rot and ordered by magnitude.
+    The eigenphases are ordered by magnitude.
     The corresponding real eigenvectors come in pairs.
+    Has only been tested for even-dimensional rotation matrices.
 
     Parameters
     ----------
     rot : np.ndarray
         orthogonal matrix of shape (d, d)
-    n_rot : int
-        number of rotations
     tol : float, default=1e-10
-        tolerance for eigenvalues to be equal to 0, in which case the corresponding 
+        tolerance for eigenvalues to be considered 0, in which case the corresponding 
         complex eigenvectors need not be complex conjugates of each other
 
     Returns
     -------
     evals : np.ndarray
-        ordered eigenphases of shape d, in units of 2*np.pi/n_rot
+        ordered eigenphases of shape d
     evecs : np.ndarray
         ordered eigenvectors of shape (d, d), each column is an eigenvector
     """
     dp = rot.shape[0]
-    unit_phase = 2*np.pi/n_rot
 
     #find the traceless, antisymmetric generator matrix GM corresponding to the orthogonal matrix rot
     #if det(rot) = 1 then GM = -1j*logm(rot)
     #if det(rot) = -1 then shift the diagonal elements by pi/dp such that tr(GM) = 0
     GM = -1j*logm(rot) + (np.linalg.det(rot)-1)/2 * np.pi/dp * np.identity(dp)
-    #GM should be antisymmetric and in units of unit_phase
-    Gs = (GM-GM.T)/2 / (unit_phase)
+    #GM should be antisymmetric
+    Gs = (GM-GM.T)/2
 
     #eigenvalues of Gs are the eigenphases of the corresponding rotation matrix
     ws, v = np.linalg.eig( Gs )
@@ -148,19 +262,19 @@ def find_eigendecomp(rot, n_rot, tol=1e-10):
     v = v[:,I]
     #order pairs such that negative first then positive
     for i in range( len(I)//2 ):
-        if evals[2*i] > 0:
+        if (np.abs(evals[2*i]) - np.abs(evals[2*i+1]) < 1e-6) & (evals[2*i] > 0):
             evals[2*i], evals[2*i+1] = evals[2*i+1], evals[2*i]
             v[:,2*i], v[:,2*i+1] = v[:,2*i+1], v[:,2*i]
 
     #convert complex eigenvectors, which come in complex conjugate pairs, to real eigenvectors
     #if the eigenvalue is close to zero, we take the real part of the eigenvector
     #if the eigenvalue is not close to zero, we take the real and imaginary
-    #part of the eigenvector and multiply by sqrt(2) to ensure normalization
+    #parts of the eigenvector and multiply by sqrt(2) to ensure normalization
     evecs = np.zeros(v.shape)
     for i in range(int(dp/2)):
         if (np.abs(evals)[2*i]<tol)|(np.abs(evals)[2*i+1]<tol):
-            evecs[:,2*i] = np.real(v[:,2*i])/np.linalg.norm(np.real(v[:,2*i]))
-            evecs[:,2*i+1] = np.real(v[:,2*i+1])/np.linalg.norm(np.real(v[:,2*i+1]))
+            evecs[:,2*i] = np.abs(v[:,2*i])/np.linalg.norm(np.abs(v[:,2*i]))
+            evecs[:,2*i+1] = np.abs(v[:,2*i+1])/np.linalg.norm(np.abs(v[:,2*i+1]))
         else:        
             evecs[:,2*i] = np.sqrt(2)*np.real(v[:,2*i])
             evecs[:,2*i+1] = np.sqrt(2)*np.imag(v[:,2*i])
@@ -184,25 +298,29 @@ def find_n_unique_perm(n_tot, n_perm):
     id_all : np.ndarray
         array of shape (n_perm, n_tot)
     """
-    id_all = np.zeros((0,n_tot))
+    if n_perm > factorial(n_tot):
+        raise ValueError("n_perm exceeds number of possible permutations")
+    
     rng = np.random.default_rng(seed=4)
-    while id_all.shape[0]<n_perm:
-        id_all = rng.permuted(np.tile(range(n_tot), n_perm).reshape(n_perm,n_tot), axis=1)
-        id_all = np.unique(id_all, axis=0)
+    seen = set()
+    while len(seen) < n_perm:
+        seen.add(tuple(rng.permutation(n_tot)))
+    id_all = np.array(list(seen))
 
     return id_all
 
 
 def find_kn_unique_samples(k, n, N):
     """
-    Find N unique samples of k integers between 0 and n-1.
+    From the integers 0 to n-1,
+    select N samples of k integers.
 
     Parameters
     ----------
     k : int
         number of integers to sample
     n : int
-        number of integers to sample from
+        total range of integers available (starting from 0)
     N : int
         number of samples
     
@@ -211,7 +329,10 @@ def find_kn_unique_samples(k, n, N):
     id_all : np.ndarray
         array of shape (N, k)
     """
+    if N * k > n:
+        raise ValueError(f"Need N*k <= n, but got N*k={N*k} > n={n}.")
+        
     rng = np.random.default_rng(seed=4)
-    id_all = rng.permuted(np.tile(range(n), N).reshape(N,n), axis=1)[:,:k]
+    id_all = rng.permutation(n)[:N*k].reshape(N, k)
 
     return id_all

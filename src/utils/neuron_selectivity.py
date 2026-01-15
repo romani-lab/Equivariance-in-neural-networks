@@ -46,18 +46,14 @@ def save_average_resp_n_cc(resp_train_trials, resp_test_trials, cache_folder, la
     np.savetxt(cc_test2x_f, cc_half_test2x, delimiter=',')
 
 
-def reliable_n_std_responses(resp_train_trials, resp_test_trials, xy_pos, cc_half_train_f, corr_thre, n_perm=100):
+def reliable_neurons(resp_train_trials, cc_half_train_f, corr_thre, n_perm=100):
     """
-    Find index for responsive neurons and normalize responses by std.
+    Find index for responsive neurons
 
     Parameters
     ----------
     resp_train_trials : np.ndarray
         array of size (n_neurons, n_stim_train, n_rot, n_trials_train) containing responses
-    resp_test_trials : np.ndarray
-        array of size (n_neurons, n_stim_test, n_rot, n_trials_test) containing responses
-    xy_pos : np.ndarray
-        array of size (n_neurons, 2) containing xy position of neurons
     cc_half_train_f : str
         path to cache file containing half correlation
     corr_thre : float
@@ -67,14 +63,6 @@ def reliable_n_std_responses(resp_train_trials, resp_test_trials, xy_pos, cc_hal
 
     Returns
     -------
-    resp_train_trials : np.ndarray
-        array of size (n_neurons, n_stim_train, n_rot, n_trials_train) containing normalized responses
-    resp_test_trials : np.ndarray
-        array of size (n_neurons, n_stim_test, n_rot, n_trials_test) containing normalized responses
-    xy_pos : np.ndarray
-        array of size (n_neurons, 2) containing xy position of neurons
-    std_train : np.ndarray
-        array of size n_neurons containing standard deviation of training responses
     idx_resp : np.ndarray
         array of indices of responsive neurons
     """
@@ -88,17 +76,13 @@ def reliable_n_std_responses(resp_train_trials, resp_test_trials, xy_pos, cc_hal
     std_train = resp_train_trials.mean(-1).reshape((resp_train_trials.shape[0], -1)).std(1)
     idx_resp = np.where( (cc_half_train>corr_thre) & (std_train>0) )[0]
 
-    #normalize responses by std
-    resp_train_trials = resp_train_trials/std_train[:,np.newaxis,np.newaxis,np.newaxis]
-    resp_test_trials = resp_test_trials/std_train[:,np.newaxis,np.newaxis,np.newaxis]
-
-    return resp_train_trials, resp_test_trials, xy_pos, std_train, idx_resp
+    return idx_resp
 
 
 def corr_half(resp, n_perm=100, tol=1e-6):
     """
-    Compute the correlation between two halves of the data 
-    for n_perm choices of halves
+    Compute the correlation for two halves of the trials 
+    for n_perm choices of halves.
 
     Parameters
     ----------

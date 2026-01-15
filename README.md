@@ -1,6 +1,6 @@
 # Equivariant neuronal populations enable simultaneous tuning and invariance
 
-This repository contains partial code for analyzing equivariance in neural networks, be it biological or artificial.
+This repository contains partial code for generating the figures of a manuscript in revision. 
 
 ## Overview
 
@@ -12,7 +12,7 @@ This project investigates how neuronal populations may carry equivariant represe
 ├── src/                    # Source code and analysis notebooks
 │   ├── utils/             # Core utility functions
 │   ├── plot_figures.ipynb # Main notebook for generating figures
-│   └── create_jobs_array.ipynb
+│   ├── plot_extended_figures.ipynb # Notebook for generating extended data figures
 ├── data/                  # Experimental data (calcium imaging)
 │   ├── 05_18_2023/       # Recording session data
 │   ├── 05_30_2023/
@@ -33,7 +33,7 @@ The primary analysis and figure generation is contained in:
 src/plot_figures.ipynb
 ```
 
-This notebook generates the main analysis figures from the preprint, including:
+This notebook generates the main analysis figures from the manuscript, including:
 - **Figure 1c-e**: Visual stimuli, reliably responsive neurons in mouse recordings, and decoding errors
 - **Figure 3b-c**: Equivariance examples, subspace summaries, and subspace decoding errors
 - **Figure 4a-b**: Equivariant subspace projections and Pearson correlation
@@ -46,8 +46,8 @@ This notebook generates the main analysis figures from the preprint, including:
 - **`data_loader.py`**: Loading and preprocessing calcium imaging data
 - **`model_loader.py`**: Interface for artificial neural network models
 - **`neuron_selectivity.py`**: Responsive neuron detection and reliability metrics
-- **`decoder_functions.py`**: Linear decoding and cross-validation
-- **`equivariance_functions.py`**: Mathematical framework for equivariance analysis
+- **`decoder_functions.py`**: Simple decoding and cross-validation
+- **`equivariance_functions.py`**: Computational method for estimating equivariance
 - **`plotting_functions.py`**: Visualization and figure generation
 - **`helper.py`**: Mathematical utilities and statistical functions
 
@@ -63,7 +63,7 @@ Please download the data from [here](https://janelia.figshare.com/articles/datas
 `model_params.csv` specifies which models to analyze:
 - `network`: Model or mouse name (incl. date of recording)
 - `layer`: Layer or visual area
-- `monitor`: Linear dimension of input image or monitor index (1: front)
+- `monitor`: Linear dimension of input image (for pixels and ANNs) or monitor index (for mice, 1: front)
 
 `fixed_params.csv` contains analysis parameters
 - `stimulus`: Stimulus set identifier
@@ -89,8 +89,8 @@ This project requires Python 3.10+ and several scientific computing packages. Al
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/hoellerj/equivariance.git
-   cd equivariance
+   git clone https://github.com/romani-lab/Equivariance-in-neural-networks.git
+   cd Equivariance-in-neural-networks
    ```
 
 2. **Install dependencies:**

@@ -9,7 +9,8 @@ from skimage.util import img_as_ubyte
 
 def load_img_sorted(stim_root, stim_name):
     """
-    Load images from a stimulus file, sort them into training and testing sets, and make them 300x300 pixels
+    Load images from a stimulus file, sort them into training and testing sets, and make them 300x300 pixels.
+    Only works for stimulus file stim_05-08-23.
 
     Parameters
     ----------
@@ -44,7 +45,7 @@ def load_img_sorted(stim_root, stim_name):
 
 def standard_img_transform(img_all, size2):
     """
-    Standard image transformations for ANNs
+    Standard image transformations for ANNs.
 
     Parameters
     ----------
@@ -53,7 +54,7 @@ def standard_img_transform(img_all, size2):
         n_all is the number of images
         n_y and n_x are the dimensions of the images
     size2 : int
-        half width of the image after scaling down 
+        half width of the image, used for scaling down 
     
     Returns
     -------
@@ -91,7 +92,8 @@ def standard_img_transform(img_all, size2):
 
 def find_n_trials(stim_name):
     """
-    Define the number of training and testing trials in the stimulus file
+    Define the number of training and testing trials in the stimulus file.
+    Only works for stimulus file stim_05-08-23.
 
     Parameters
     ----------
@@ -116,7 +118,8 @@ def find_n_trials(stim_name):
 
 def find_n_imgs(stim_name):
     """
-    Define the number of angles, training images, and testing images in the stimulus file
+    Define the number of angles, training images, and testing images in the stimulus file.
+    Only works for stimulus file stim_05-08-23.
 
     Parameters
     ----------
@@ -133,11 +136,8 @@ def find_n_imgs(stim_name):
         number of testing images
     """
     if stim_name=='stim_05-08-23':
-        #number of angles
         n_rot = 15
-        #number of training imgs
         n_train = 2*45
-        #number of testing imgs
         n_test = 2*1
     else:
         raise ValueError('Can only handle stimulus file stim_05-08-23')
@@ -147,7 +147,8 @@ def find_n_imgs(stim_name):
 
 def find_sort_idx(stim_root, stim_name):
     """
-    Find the indices of the training and testing images in the stimulus file
+    Find the indices of the training and testing images in the stimulus file.
+    Only works for stimulus file stim_05-08-23.
 
     Parameters
     ----------
