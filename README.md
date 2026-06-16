@@ -1,10 +1,6 @@
 # Equivariant neuronal populations enable simultaneous tuning and invariance
 
-This repository contains code for generating the figures of a manuscript in revision.
-
-## Preprint
-
-The accompanying preprint is available on bioRxiv: [Equivariant neuronal populations enable simultaneous tuning and invariance](https://www.biorxiv.org/content/10.1101/2024.08.02.606398v2.article-info) (doi: [10.1101/2024.08.02.606398](https://doi.org/10.1101/2024.08.02.606398)).
+The accompanying preprint is available on bioRxiv: [Equivariant neuronal populations enable simultaneous tuning and invariance](https://www.biorxiv.org/content/10.1101/2024.08.02.606398v2).
 
 ## Overview
 
