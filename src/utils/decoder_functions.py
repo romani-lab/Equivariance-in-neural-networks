@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pickle as pkl
 from sklearn.svm import LinearSVC
+import os
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from sklearn.utils.extmath import randomized_svd
@@ -15,7 +16,7 @@ from utils.stimulus_loader import find_n_imgs
 
 
 def decode_all(model_df, params_df, project_root, c_range=[0.001], ref_index=0, equivariant=False, model=False, \
-               orientation_decoding=True, class_decoding=True):
+               orientation_decoding=True, class_decoding=True, verbose=False):
     """
     Run orientation and texture decoding analysis for all models and layers specified in model_df
     with the parameters specified in params_df.
@@ -42,6 +43,8 @@ def decode_all(model_df, params_df, project_root, c_range=[0.001], ref_index=0, 
         whether to run orientation decoding analysis
     class_decoding : bool, default=True
         whether to run texture decoding analysis
+    verbose : bool, default=False
+        whether to print progress messages
 
     Returns
     -------
@@ -57,6 +60,9 @@ def decode_all(model_df, params_df, project_root, c_range=[0.001], ref_index=0, 
     n_neurons = int(params_df.loc['n_neurons'].value)
     n_max = int(params_df.loc['n_max'].value)
     noise_model = params_df.loc['noise_model'].value
+    #non-gaussian noise models get a filename suffix so they do not clobber the
+    #default gaussian caches
+    noise_suffix = '' if noise_model == 'gaussian' else f'_{noise_model}'
     if equivariant:
         d = int(params_df.loc['n_procs'].value)
         suffix = f'_{d}dim'
@@ -65,6 +71,7 @@ def decode_all(model_df, params_df, project_root, c_range=[0.001], ref_index=0, 
     else:
         d = None
         suffix = ''
+    suffix += noise_suffix
 
     print(f'Starting decoding analysis...')
     print(f'Parameters: n_neurons={n_neurons}, n_max={n_max}')
@@ -81,9 +88,24 @@ def decode_all(model_df, params_df, project_root, c_range=[0.001], ref_index=0, 
         monitor = model_df['monitor'].values[i0]
         cache_folder = project_root / 'cache' / model_name
         cache_folder.mkdir(parents=True, exist_ok=True)
+
+        # Check if all required outputs already exist in cache
+        ori_cache = cache_folder / f'{layer_name}_ori2x_decoder_{ref_index}ref_{n_neurons}avg{suffix}.csv'
+        if len(c_range)==1:
+            class_cache = cache_folder / f'{layer_name}_class2x_decoder_{n_neurons}avg_{c_range[0]}C{suffix}.csv'
+        else:
+            class_cache = cache_folder / f'{layer_name}_class2x_decoder_{n_neurons}avg_Crange{suffix}.csv'
+
+        ori_needed = orientation_decoding and not ori_cache.exists()
+        class_needed = class_decoding and not class_cache.exists()
+
+        if not ori_needed and not class_needed:
+            print(f'  {model_name} {layer_name}: all cached, skipping')
+            continue
+
         print(f'Processing {model_name} {layer_name}')
 
-        if np.isin(model_name,['pixels','alexnet']):
+        if np.isin(model_name,['pixels','alexnet','random_alexnet']) or model_name.startswith('alt_alexnet'):
             resp_train_trials, resp_test_trials, _, idx_resp = model_train_test_responses(model_name, layer_name, \
                                                                                     stim_root, stim_name, \
                                                                                     monitor, corr_thre, cache_folder, \
@@ -103,29 +125,26 @@ def decode_all(model_df, params_df, project_root, c_range=[0.001], ref_index=0, 
                 resp_train_trials0 = resp_train_trials0[idx_resp]
                 resp_test_trials0 = resp_test_trials0[idx_resp]
                 retinotopy_fn = retinotopy_root / f'{model_name}_{stim_name}.npz'
-            
+
             #for later layers, just subselect neurons in that layer
             idx_area = find_area_neurons(retinotopy_fn, layer_name, idx_resp)
             resp_train_trials = resp_train_trials0[idx_area]
             resp_test_trials = resp_test_trials0[idx_area]
 
-        #concatenate training and test responses 
+        #concatenate training and test responses
         #for test, select the first 2 out of 80 trials, to match the number of training trials
         resp_all_trials = np.concatenate((resp_train_trials, resp_test_trials[:,:,:,:2]), axis=1)
 
-        if orientation_decoding:
-            result_df = orientation2x_2d_decoder(resp_all_trials.mean(-1), n_neurons, d=d, n_max=n_max, model=model, ref_index=ref_index)
-            result_df.to_csv(cache_folder / f'{layer_name}_ori2x_decoder_{ref_index}ref_{n_neurons}avg{suffix}.csv', index=False)
+        if ori_needed:
+            result_df = orientation2x_2d_decoder(resp_all_trials.mean(-1), n_neurons, d=d, n_max=n_max, model=model, ref_index=ref_index, verbose=verbose)
+            result_df.to_csv(ori_cache, index=False)
 
-        if class_decoding:
-            svm_df = texture2x_svm_decoder_parallel(resp_all_trials, n_neurons, c_range, d=d, n_max=n_max, model=model)
-            if len(c_range)==1:
-                svm_df.to_csv(cache_folder / f'{layer_name}_class2x_decoder_{n_neurons}avg_{c_range[0]}C{suffix}.csv', index=False)
-            else:
-                svm_df.to_csv(cache_folder / f'{layer_name}_class2x_decoder_{n_neurons}avg_Crange{suffix}.csv', index=False)
+        if class_needed:
+            svm_df = texture2x_svm_decoder_parallel(resp_all_trials, n_neurons, c_range, d=d, n_max=n_max, model=model, verbose=verbose)
+            svm_df.to_csv(class_cache, index=False)
 
 
-def decoder_effect_sizes(model_df, params_df, project_root, C0=0.001):
+def decoder_effect_sizes(model_df, params_df, project_root, C0=0.001, C1=1):
     """
     Compute and save effect sizes for SVM and orientation decoder
     for all models and layers specified in model_df with the parameters specified in params_df.
@@ -139,8 +158,11 @@ def decoder_effect_sizes(model_df, params_df, project_root, C0=0.001):
     project_root : Path
         root directory of the project
     C0 : float, default=0.001
-        regularization parameter for linear SVM classifier
+        regularization parameter for linear SVM classifier on full space
+    C1 : float, default=1
+        regularization parameter for linear SVM classifier on subspace
 
+        
     Returns
     -------
     None
@@ -156,9 +178,11 @@ def decoder_effect_sizes(model_df, params_df, project_root, C0=0.001):
     #loop over svm and ori decoders
     for i in range(2):
         if i==0:
-            decoder_f = f'class2x_decoder_{n_neurons}avg_{C0}C'
+            decoder_f0 = f'class2x_decoder_{n_neurons}avg_{C0}C'
+            decoder_f1 = f'class2x_decoder_{n_neurons}avg_{C1}C'
         else:
-            decoder_f = f'ori2x_decoder_0ref_{n_neurons}avg'
+            decoder_f0 = f'ori2x_decoder_0ref_{n_neurons}avg'
+            decoder_f1 = f'ori2x_decoder_0ref_{n_neurons}avg'
             
         #collect results across layers
         results_df = pd.DataFrame()
@@ -167,11 +191,11 @@ def decoder_effect_sizes(model_df, params_df, project_root, C0=0.001):
             layer_name = model_df['layer'].values[i0]
             cache_folder = project_root / f'cache' / model_name
 
-            class_f = cache_folder / f'{layer_name}_{decoder_f}.csv'
+            class_f = cache_folder / f'{layer_name}_{decoder_f0}.csv'
             tmp_df = pd.read_csv(class_f)
             tmp_df['model'] = model_name
             tmp_df['area'] = layer_name
-            class_f2 = cache_folder / f'{layer_name}_{decoder_f}_{d}dim.csv'
+            class_f2 = cache_folder / f'{layer_name}_{decoder_f1}_{d}dim.csv'
             tmp_df2 = pd.read_csv(class_f2)
             tmp_df2['model'] = model_name
             tmp_df2['area'] = layer_name
@@ -190,7 +214,7 @@ def decoder_effect_sizes(model_df, params_df, project_root, C0=0.001):
             result_df['area'] = layer_name
             results_df = pd.concat([results_df, result_df], axis=0)
 
-        results_df.to_csv(results_folder / f'{decoder_f.split("_")[0]}_effect_sizes_{d}dim.csv', index=False)
+        results_df.to_csv(results_folder / f'{decoder_f0.split("_")[0]}_effect_sizes_{d}dim.csv', index=False)
 
 
 def distance_all(model_df, params_df, project_root):
@@ -223,6 +247,13 @@ def distance_all(model_df, params_df, project_root):
         model_name = model_df['network'].values[i0]
         layer_name = model_df['layer'].values[i0]
         cache_folder = project_root / 'cache' / model_name
+
+        # Check if all required outputs already exist in cache
+        suffixes = ['', f'_{d}dim_inv', f'_{d}dim_tun']
+        all_cached = all((cache_folder / f'{layer_name}_distances_avg{s}.csv').exists() for s in suffixes)
+        if all_cached:
+            print(f'  {model_name} {layer_name}: all cached, skipping')
+            continue
 
         avg_train_f = cache_folder / f'{layer_name}_avg_resp_train.p'
         avg_test_f = cache_folder / f'{layer_name}_avg_resp_test.p'
@@ -303,9 +334,9 @@ def example_decoder_weights(model_df, params_df, project_root, C0=0.001, equivar
     -------
     None
         saves weights to CSV files in project_root / 'cache' / model_name:
-        - orientation weights: {layer_name}_ori12_weights.csv
-        - SVM weights: {layer_name}_svm12_weights.csv
-    """    
+        - orientation weights: {layer_name}_ori12_weights_{n_neurons}rand{suffix}.csv
+        - SVM weights: {layer_name}_svm12_weights_{n_neurons}rand{suffix}.csv
+    """
     #get parameters
     stim_name = params_df.loc['stimulus'].value
     corr_thre = float(params_df.loc['corr_thre'].value)
@@ -334,9 +365,17 @@ def example_decoder_weights(model_df, params_df, project_root, C0=0.001, equivar
         monitor = model_df['monitor'].values[i0]
         cache_folder = project_root / 'cache' / model_name
         cache_folder.mkdir(parents=True, exist_ok=True)
+
+        # Check if all required outputs already exist in cache
+        ori_cache = cache_folder / f'{layer_name}_ori12_weights_{n_neurons}rand{suffix}.csv'
+        svm_cache = cache_folder / f'{layer_name}_svm12_weights_{n_neurons}rand{suffix}.csv'
+        if ori_cache.exists() and svm_cache.exists():
+            print(f'  {model_name} {layer_name}: all cached, skipping')
+            continue
+
         print(f'Processing {model_name} {layer_name}')
 
-        if np.isin(model_name,['pixels','alexnet']):
+        if np.isin(model_name,['pixels','alexnet','random_alexnet']):
             resp_train_trials, resp_test_trials, _, idx_resp = model_train_test_responses(model_name, layer_name, \
                                                                                     stim_root, stim_name, \
                                                                                     monitor, corr_thre, cache_folder, \
@@ -356,7 +395,7 @@ def example_decoder_weights(model_df, params_df, project_root, C0=0.001, equivar
                 resp_train_trials0 = resp_train_trials0[idx_resp]
                 resp_test_trials0 = resp_test_trials0[idx_resp]
                 retinotopy_fn = retinotopy_root / f'{model_name}_{stim_name}.npz'
-            
+
             #for later layers, just subselect neurons in that layer
             idx_area = find_area_neurons(retinotopy_fn, layer_name, idx_resp)
             resp_train_trials = resp_train_trials0[idx_area]
@@ -395,7 +434,8 @@ def example_decoder_weights(model_df, params_df, project_root, C0=0.001, equivar
         # if equivariant:
         #     w_ori = eigenproj_k @ w_ori
         w_df = pd.DataFrame(w_ori, columns=['PC1','PC2'])
-        w_df['proc_id'] = range(len(id1))
+        if equivariant:
+            w_df['proc_id'] = range(len(id1))
         w_df.to_csv(cache_folder / f'{layer_name}_ori12_weights_{n_neurons}rand{suffix}.csv', index=False)
 
         #find SVM weights
@@ -418,11 +458,16 @@ def example_decoder_weights(model_df, params_df, project_root, C0=0.001, equivar
             x_train_k = np.einsum('ij,iklm->jklm', eigenproj_k, x_train_k)
         x_train_k = x_train_k.reshape((x_train_k.shape[0], -1))
         svm = LinearSVC(dual=False, C=C0, class_weight=None).fit(x_train_k.T, y_train)
-        w_svm = svm.coef_[-2:].T/np.linalg.norm(svm.coef_[-2:].T, axis=1, keepdims=True)
+        #normalize each class weight vector (column) to unit norm across neurons, so the
+        #per-neuron weights stay small and centered (axis=0), as in the preprint. Using
+        #axis=1 instead normalizes each neuron across the 2 classes and forces every point
+        #onto the unit circle.
+        w_svm = svm.coef_[-2:].T/np.linalg.norm(svm.coef_[-2:].T, axis=0, keepdims=True)
         # if equivariant:
         #     w_svm = eigenproj_k @ w_svm
         w_df = pd.DataFrame(w_svm, columns=['img91','img92'])
-        w_df['proc_id'] = range(len(id0))
+        if equivariant:
+            w_df['proc_id'] = range(len(id0))
         w_df.to_csv(cache_folder / f'{layer_name}_svm12_weights_{n_neurons}rand{suffix}.csv', index=False)
 
 
@@ -466,7 +511,7 @@ def proj12_n_norm(x_train, x_test):
 
     Returns
     -------
-    x_rot : np.ndarray
+    x_test_proj : np.ndarray
         normalized 2D projected responses of shape (2, n_stim, n_rot)
     """
     n_neurons, _, n_rot = x_test.shape
@@ -512,7 +557,7 @@ def orientation2x_2d_decoder(x_train, n_neurons, rot_step=24, ref_index=0,
         whether to print performance metrics
     model : bool, default=False
         whether to run decoder on projected model predictions or projected recorded responses
-        
+
     Returns
     -------
     results_df : pd.DataFrame
@@ -535,18 +580,19 @@ def orientation2x_2d_decoder(x_train, n_neurons, rot_step=24, ref_index=0,
     angle_err_test = np.zeros(n_train*n_angles)
     ct = 0
     for k in range(k_rand):
-        x_train_k = x_train[k_samp[k]].copy()
+        x_train_k_all = x_train[k_samp[k]].copy()
         #shift reference orientation
-        x_train_k = np.roll(x_train_k, -ref_index, axis=2)
+        x_train_k_all = np.roll(x_train_k_all, -ref_index, axis=2)
         for i in range(n_train):
+            train_mask = np.arange(n_train)!=i
             #normalize by std of training responses
-            std_norm = x_train_k[:,np.arange(n_train)!=i].std(axis=(1,2), keepdims=True)
+            std_norm = x_train_k_all[:,train_mask].std(axis=(1,2), keepdims=True)
             idx_nonzero = std_norm.squeeze() > 0
-            x_train_k[idx_nonzero] = x_train_k[idx_nonzero] / std_norm[idx_nonzero]
+            x_train_k_norm = x_train_k_all[idx_nonzero] / std_norm[idx_nonzero]
 
             #separate training and test sets
-            x_train_k_i = x_train_k[:,np.arange(n_train)!=i][idx_nonzero] / std_norm[idx_nonzero]
-            x_test_k_i = x_train_k[:,i:(i+1)][idx_nonzero] / std_norm[idx_nonzero]
+            x_train_k_i = x_train_k_norm[:,train_mask]
+            x_test_k_i = x_train_k_norm[:,i:(i+1)]
 
             #if d is None, no projection
             if d is None:
@@ -596,7 +642,8 @@ def orientation2x_2d_decoder(x_train, n_neurons, rot_step=24, ref_index=0,
     })
 
     if verbose:
-        print(f'Skipped {ct} samples because no tuned dimensions.')
+        if d is not None:
+            print(f'Skipped {ct} samples because no tuned dimensions.')
         print(f"R2 test: {results_df['R2'].mean():.2f}")
         print(f"res test: {results_df['res'].mean():.2f}")
 
@@ -767,10 +814,9 @@ def texture2x_svm_decoder_parallel(x_train, n_neurons, c_range,
             results = [compute_single_k_svm(args_list[0])]
         else:
             ctx = get_context("spawn")
-            # print("About to enter ProcessPoolExecutor")
-            with ProcessPoolExecutor(max_workers=4, mp_context=ctx) as executor:
+            n_workers = int(os.environ.get('LSB_MAX_NUM_PROCESSORS', 4))
+            with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
                 results = list(executor.map(compute_single_k_svm, args_list))
-            # print("Finished executor.map")
         
         #aggregate mean results (across k_rand samples)
         acc_train = np.zeros((n_rot, n_train))

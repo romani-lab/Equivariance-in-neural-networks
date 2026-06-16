@@ -1,0 +1,7 @@
+﻿monitor,network,layer
+112,pixels,pixels
+20,alexnet,conv1
+20,alexnet,conv2
+20,alexnet,conv3
+20,alexnet,conv4
+20,alexnet,conv5

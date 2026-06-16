@@ -13,5 +13,7 @@
 
 ### private files not to share on github
 private/
-cache/
-results/
+data/
+logs*/
+cache*/
+results*/

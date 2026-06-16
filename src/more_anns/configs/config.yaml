@@ -1,0 +1,34 @@
+# Main configuration file
+defaults:
+  - task: classification
+  - _self_
+
+# Experiment name (override with experiment=exp01)
+experiment: default
+
+# HuggingFace Hub logging (set to repo ID to enable, e.g., "user/equivariance")
+hf_repo_id: null
+
+# Dataset settings
+data:
+  dataset: ILSVRC/imagenet-1k
+  num_workers: 4
+
+# Training settings
+training:
+  num_epochs: 90
+  batch_size: 256
+  device: cuda
+
+# Optimizer settings
+optimizer:
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 1e-4
+
+# Hydra settings
+hydra:
+  run:
+    dir: cache/more_anns/${experiment}
+  job:
+    chdir: true

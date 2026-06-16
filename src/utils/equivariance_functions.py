@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pickle as pkl
+import os
 from scipy.stats import wilcoxon
 from sklearn.utils.extmath import randomized_svd
 from scipy.spatial.distance import pdist
@@ -21,7 +22,7 @@ def equivariance_summary_all(model_df, params_df, project_root):
     Parameters
     ----------
     model_df : pd.DataFrame
-        dataframe containing model specifications with columns 'network', 'layer'
+        dataframe containing model specifications with columns 'network', 'layer', 'monitor'
     params_df : pd.DataFrame
         dataframe containing parameters including 'n_neurons', 'n_max', 'n_procs'
     project_root : pathlib.Path
@@ -38,7 +39,11 @@ def equivariance_summary_all(model_df, params_df, project_root):
     n_neurons = int(params_df.loc['n_neurons'].value)
     n_max = int(params_df.loc['n_max'].value)
     d = int(params_df.loc['n_procs'].value)
-    
+    noise_model = params_df.loc['noise_model'].value
+    #non-gaussian noise models read/write suffixed caches (written by example_equiv_projs)
+    #so they do not clobber the default gaussian caches
+    noise_suffix = '' if noise_model == 'gaussian' else f'_{noise_model}'
+
     print(f'Starting equivariance analysis...')
     print(f'Parameters: n_neurons={n_neurons}, n_max={n_max}, d={d}')
 
@@ -48,11 +53,18 @@ def equivariance_summary_all(model_df, params_df, project_root):
         layer_name = model_df['layer'].values[i0]
         cache_folder = project_root / f'cache' / model_name
         print(f'Processing {model_name} {layer_name}')
-        
-        avg_train_f = cache_folder / f'{layer_name}_avg_resp_train.p'
-        avg_test2x_f = cache_folder / f'{layer_name}_avg_resp_test2x.p'
-        cc_train_f = cache_folder / f'{layer_name}_cc_half_train.csv'
-        cc_test2x_f = cache_folder / f'{layer_name}_cc_half_test2x.csv'
+
+        # Check if all required outputs already exist in cache
+        var_cache = cache_folder / f'{layer_name}_var_dim_{n_neurons}avg_{d}dim{noise_suffix}.csv'
+        perf_cache = cache_folder / f'{layer_name}_equivariance_{n_neurons}avg_{d}dim{noise_suffix}.csv'
+        if var_cache.exists() and perf_cache.exists():
+            print(f'  {model_name} {layer_name}: all cached, skipping')
+            continue
+
+        avg_train_f = cache_folder / f'{layer_name}_avg_resp_train{noise_suffix}.p'
+        avg_test2x_f = cache_folder / f'{layer_name}_avg_resp_test2x{noise_suffix}.p'
+        cc_train_f = cache_folder / f'{layer_name}_cc_half_train{noise_suffix}.csv'
+        cc_test2x_f = cache_folder / f'{layer_name}_cc_half_test2x{noise_suffix}.csv'
         if (avg_train_f.exists()==False) | (avg_test2x_f.exists()==False) | (cc_train_f.exists()==False) | (cc_test2x_f.exists()==False):
             print(f'No average data found; run example_equiv_projs first')
             continue
@@ -102,8 +114,8 @@ def equivariance_summary_all(model_df, params_df, project_root):
         tmp_df['stim'] = n_train // 2
         performance_df = pd.concat((performance_df, tmp_df), axis=0)
 
-        var_df.to_csv(cache_folder / f'{layer_name}_var_dim_{n_neurons}avg_{d}dim.csv', index=False)
-        performance_df.to_csv(cache_folder / f'{layer_name}_equivariance_{n_neurons}avg_{d}dim.csv', index=False)
+        var_df.to_csv(cache_folder / f'{layer_name}_var_dim_{n_neurons}avg_{d}dim{noise_suffix}.csv', index=False)
+        performance_df.to_csv(cache_folder / f'{layer_name}_equivariance_{n_neurons}avg_{d}dim{noise_suffix}.csv', index=False)
         
 
 def example_equiv_projs(model_df, params_df, project_root):
@@ -137,6 +149,9 @@ def example_equiv_projs(model_df, params_df, project_root):
     inv_snr = float(params_df.loc['inv_snr'].value)
     d = int(params_df.loc['n_procs'].value)
     noise_model = params_df.loc['noise_model'].value
+    #non-gaussian noise models get a filename suffix so they do not clobber the
+    #default gaussian caches
+    noise_suffix = '' if noise_model == 'gaussian' else f'_{noise_model}'
 
     #define folders
     data_root = project_root / 'data'
@@ -145,7 +160,7 @@ def example_equiv_projs(model_df, params_df, project_root):
 
     #loop over models & layers
     for i0 in range(model_df.shape[0]):
-        
+
         model_name = model_df['network'].values[i0]
         layer_name = model_df['layer'].values[i0]
         monitor = model_df['monitor'].values[i0]
@@ -153,7 +168,15 @@ def example_equiv_projs(model_df, params_df, project_root):
         cache_folder.mkdir(parents=True, exist_ok=True)
         print(f'Processing {model_name} {layer_name}')
 
-        if np.isin(model_name,['pixels','alexnet']):
+        # Check if all required outputs already exist in cache
+        evals_cache = cache_folder / f'{layer_name}_example_evals_abs_{n_neurons}rand_{d}dim{noise_suffix}.p'
+        projs_data_cache = cache_folder / f'{layer_name}_example_projs_data_{n_neurons}rand_{d}dim{noise_suffix}.p'
+        projs_model_cache = cache_folder / f'{layer_name}_example_projs_model_{n_neurons}rand_{d}dim{noise_suffix}.p'
+        if evals_cache.exists() and projs_data_cache.exists() and projs_model_cache.exists():
+            print(f'  {model_name} {layer_name}: all cached, skipping')
+            continue
+
+        if np.isin(model_name,['pixels','alexnet','random_alexnet']) or model_name.startswith('alt_alexnet'):
             resp_train_trials, resp_test_trials, _, idx_resp = model_train_test_responses(model_name, layer_name, \
                                                                                     stim_root, stim_name, \
                                                                                     monitor, corr_thre, cache_folder, \
@@ -178,14 +201,19 @@ def example_equiv_projs(model_df, params_df, project_root):
             resp_test_trials = resp_test_trials0[idx_area]
 
         #save average responses and trial-to-trial variability for later use
-        save_average_resp_n_cc(resp_train_trials, resp_test_trials, cache_folder, layer_name)
+        save_average_resp_n_cc(resp_train_trials, resp_test_trials, cache_folder, layer_name, noise_suffix=noise_suffix)
 
         #randomly subsample of n_neurons neurons
         n_resp, n_train, n_rot, _ = resp_train_trials.shape
         _, n_test, _, n_trials_test = resp_test_trials.shape
         n_neurons0 = min(n_neurons, resp_train_trials.shape[0])
         k_rand = np.min([np.max([n_resp // n_neurons0, 1]), 100])
-        if k_rand>3:
+        if model_name=='alexnet' and layer_name=='conv5':
+            #conv5 has only ~303 responsive units and we draw 250, so k_rand==1: there is
+            #only one disjoint sample. Use a different draw than the default seed-4 path
+            #(same scheme as find_kn_unique_samples, seed 7) for a different random subselection.
+            k_samp = np.random.default_rng(seed=7).permutation(n_resp)[:n_neurons0]
+        elif k_rand>3:
             k_samp = find_kn_unique_samples(n_neurons0, n_resp, k_rand)[3]
         else:
             k_samp = find_kn_unique_samples(n_neurons0, n_resp, k_rand)[0]
@@ -200,7 +228,7 @@ def example_equiv_projs(model_df, params_df, project_root):
 
         #save absolute eigenvalues
         tmp_df = pd.DataFrame({'x': np.arange(d)+1, 'y': np.abs(evals)})
-        pkl.dump(tmp_df, open( cache_folder / f'{layer_name}_example_evals_abs_{n_neurons}rand_{d}dim.p', "wb" ) )
+        pkl.dump(tmp_df, open( cache_folder / f'{layer_name}_example_evals_abs_{n_neurons}rand_{d}dim{noise_suffix}.p', "wb" ) )
 
         #project testing data
         proj_df = pd.DataFrame()
@@ -216,7 +244,7 @@ def example_equiv_projs(model_df, params_df, project_root):
                 tmp_df['eigenspace_index'] = 2*j+1
                 tmp_df['eval'] = evals[2*j]
                 proj_df = pd.concat([proj_df, tmp_df], axis=0, ignore_index=True)
-        pkl.dump(proj_df, open( cache_folder / f'{layer_name}_example_projs_data_{n_neurons}rand_{d}dim.p', "wb" ) )
+        pkl.dump(proj_df, open( cache_folder / f'{layer_name}_example_projs_data_{n_neurons}rand_{d}dim{noise_suffix}.p', "wb" ) )
 
         #project equivariance model predictions
         x_test_k = x_test_trials_k.mean(-1)
@@ -233,7 +261,7 @@ def example_equiv_projs(model_df, params_df, project_root):
                 tmp_df['eigenspace_index'] = 2*j+1
                 tmp_df['eval'] = evals[2*j]
                 proj_df = pd.concat([proj_df, tmp_df], axis=0, ignore_index=True)
-        pkl.dump(proj_df, open( cache_folder / f'{layer_name}_example_projs_model_{n_neurons}rand_{d}dim.p', "wb" ) )
+        pkl.dump(proj_df, open( cache_folder / f'{layer_name}_example_projs_model_{n_neurons}rand_{d}dim{noise_suffix}.p', "wb" ) )
 
 
 def calculate_predictions(x, proj, proj_shift, rot, rot_shift):
@@ -317,6 +345,12 @@ def calculate_proj_rot_shift(x, d):
     rot = U_d @ VT_d
     rot_shift = ( rot @ A_d - B_d ).mean(1)
 
+    #enforce proper rotation
+    if np.linalg.det(rot) < 0:        
+        U_d[:,-1] = -U_d[:,-1]
+        rot = U_d @ VT_d
+        rot_shift = ( rot @ A_d - B_d ).mean(1)
+        
     return proj, proj_shift, rot, rot_shift
 
 
@@ -419,7 +453,8 @@ def equivariance_quantification_parallel(x_train_avg, x_test_avg, n_neurons, d, 
         #fallback to sequential processing for single sample
         results = [compute_single_k_quantification(args_list[0])]
     else:
-        with ProcessPoolExecutor() as executor:
+        n_workers = int(os.environ.get('LSB_MAX_NUM_PROCESSORS', 4))
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
             results = list(executor.map(compute_single_k_quantification, args_list))
     
     #average aggregated results
@@ -513,11 +548,11 @@ def equivariance_performance_parallel(x_train_avg, x_test_avg, cc_half_test, n_n
     Returns
     -------
     err_df : pd.DataFrame
-        performance results on actual data
+        performance results on actual data with columns 'dim', 'n_nonan', 'cc_mean'
     err_df_perm : pd.DataFrame
-        performance results on shuffled data
+        performance results on shuffled data with columns 'dim', 'n_nonan', 'cc_mean'
     p_vals_mean : np.ndarray
-        mean p-values across dimensions
+        mean p-values across random samples, of shape (len(d_range),)
     """
     #in case x_train.shape[0] is smaller than n_neurons
     n_neurons = min(n_neurons, x_train_avg.shape[0])
@@ -557,7 +592,8 @@ def equivariance_performance_parallel(x_train_avg, x_test_avg, cc_half_test, n_n
                 #fallback to sequential processing for single sample
                 results = [compute_single_k_performance(args_list[0])]
             else:
-                with ProcessPoolExecutor() as executor:
+                n_workers = int(os.environ.get('LSB_MAX_NUM_PROCESSORS', 4))
+                with ProcessPoolExecutor(max_workers=n_workers) as executor:
                     results = list(executor.map(compute_single_k_performance, args_list))
             
             #collect and average results across parallel processes
@@ -600,3 +636,108 @@ def equivariance_performance_parallel(x_train_avg, x_test_avg, cc_half_test, n_n
                     print(f"pval: {np.nanmean(p_vals[j]):.2f}")
 
     return err_df, err_df_perm, np.nanmean(p_vals, axis=1)
+
+
+def equivariance_ccnorm_vs_dim_all(model_df, params_df, project_root, d_range=None):
+    """
+    Compute the equivariance model's predictive CCnorm as a function of the fitted
+    subspace dimension d, for all models and layers specified in model_df.
+
+    For each model/layer the subspace dimension is swept over d_range. At every
+    dimension the equivariance model is fit on a leave-two-stimuli-out training set
+    and the normalized correlation (CCnorm) is evaluated on the two held-out
+    stimuli, exactly as equivariance_summary_all does at the single dimension d
+    (so the d == n_procs point reproduces the cached
+    {layer_name}_equivariance_{n_neurons}avg_{d}dim.csv result).
+
+    Parameters
+    ----------
+    model_df : pd.DataFrame
+        dataframe containing model specifications with columns 'network', 'layer', 'monitor'
+    params_df : pd.DataFrame
+        dataframe containing parameters including 'n_neurons', 'n_max', 'n_procs'
+    project_root : pathlib.Path
+        path to the project root directory
+    d_range : array-like, optional
+        subspace dimensions to evaluate. Defaults to np.arange(2, 61, 2), i.e.
+        even dimensions up to 60, as used for the preprint.
+
+    Returns
+    -------
+    None
+        saves results to CSV files in project_root / 'cache' / model_name:
+        {layer_name}_ccnorm_vs_dim_{n_neurons}avg_{d}dim.csv with columns
+        'dim', 'cc_mean', 'stim'.
+    """
+    n_neurons = int(params_df.loc['n_neurons'].value)
+    n_max = int(params_df.loc['n_max'].value)
+    d = int(params_df.loc['n_procs'].value)
+    if d_range is None:
+        #sweep even dimensions up to 60 (as in the preprint), independent of n_procs
+        d_range = np.arange(2, 61, 2)
+    d_range = [int(d0) for d0 in d_range]
+
+    print(f'Starting CCnorm-vs-dimension analysis...')
+    print(f'Parameters: n_neurons={n_neurons}, n_max={n_max}, d_range={d_range}')
+
+    #loop over models & layers
+    for i0 in range(model_df.shape[0]):
+        model_name = model_df['network'].values[i0]
+        layer_name = model_df['layer'].values[i0]
+        cache_folder = project_root / f'cache' / model_name
+        print(f'Processing {model_name} {layer_name}')
+
+        out_f = cache_folder / f'{layer_name}_ccnorm_vs_dim_{n_neurons}avg_{d}dim.csv'
+        if out_f.exists():
+            print(f'  {model_name} {layer_name}: cached, skipping')
+            continue
+
+        avg_train_f = cache_folder / f'{layer_name}_avg_resp_train.p'
+        avg_test2x_f = cache_folder / f'{layer_name}_avg_resp_test2x.p'
+        cc_train_f = cache_folder / f'{layer_name}_cc_half_train.csv'
+        cc_test2x_f = cache_folder / f'{layer_name}_cc_half_test2x.csv'
+        if (avg_train_f.exists()==False) | (avg_test2x_f.exists()==False) | (cc_train_f.exists()==False) | (cc_test2x_f.exists()==False):
+            print(f'No average data found; run example_equiv_projs first')
+            continue
+        x_train_avg = pkl.load( open( avg_train_f, "rb" ) )
+        x_test_avg = pkl.load( open( avg_test2x_f, "rb" ) )
+        cc_half_train = np.loadtxt(cc_train_f, delimiter=',')
+        cc_half_test = np.loadtxt(cc_test2x_f, delimiter=',')
+
+        #combine train with test
+        n_train = x_train_avg.shape[1]
+        n_test = x_test_avg.shape[1]
+        n_all = n_train + n_test
+        x_all_avg = np.concatenate((x_train_avg, x_test_avg), axis=1)
+        cc_half_all = np.concatenate((cc_half_train, cc_half_test), axis=1)
+
+        #neuron subsampling (same scheme as equivariance_performance_parallel)
+        n_neurons_l = min(n_neurons, x_all_avg.shape[0])
+        k_rand = int(np.min([np.max([x_all_avg.shape[0] // n_neurons_l, 1]), n_max]))
+
+        #leave-two-stimuli-out pairs, matching equivariance_summary_all
+        pair_idx = [(i, n_train // 2 + i) for i in range(n_train // 2)] + [(n_train, n_train + 1)]
+
+        out_df = pd.DataFrame()
+        for stim, (a, b) in enumerate(pair_idx):
+            mask = (np.arange(n_all) != a) & (np.arange(n_all) != b)
+            x_train_i = x_all_avg[:, mask]
+            x_test_i = x_all_avg[:, [a, b]]
+            cc_test_i = cc_half_all[:, [a, b]]
+            cc_max_test = np.sqrt(2 * cc_test_i / (1 + cc_test_i))
+            k_samp = find_kn_unique_samples(n_neurons_l, x_all_avg.shape[0], k_rand)
+
+            #sweep subspace dimension; cc averaged over neuron subsamples (no shuffle)
+            for d0 in d_range:
+                cc_d = 0.0
+                for k in range(k_rand):
+                    _, cc_all_k = compute_single_k_performance(
+                        (d0, x_train_i[k_samp[k]].copy(), x_test_i[k_samp[k]].copy(),
+                         cc_max_test[k_samp[k]].copy()))
+                    cc_d += np.nanmean(cc_all_k[:, 0]) / k_rand
+                out_df = pd.concat([out_df,
+                                    pd.DataFrame({'dim': [d0], 'cc_mean': [cc_d], 'stim': [stim]})],
+                                   axis=0)
+
+        out_df.to_csv(out_f, index=False)
+        print(f'  saved {out_f.name}')

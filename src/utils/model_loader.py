@@ -5,6 +5,7 @@ import numpy as np
 
 from utils.stimulus_loader import load_img_sorted, standard_img_transform, find_n_trials, find_n_imgs
 from utils.neuron_selectivity import reliable_neurons
+from more_anns.feature_extractor import FeatureExtractor
 
 
 def model_train_test_responses(model_name, layer_name, stim_root, stim_name, size2, corr_thre, cache_folder, 
@@ -51,13 +52,16 @@ def model_train_test_responses(model_name, layer_name, stim_root, stim_name, siz
         array of indices of responsive neurons    
     """
     resp_all, xy_pos = model_responses(model_name, layer_name, stim_root, \
-                                    stim_name, size2=size2)
-    resp_train_trials, resp_test_trials = train_test_split_w_noise(resp_all, stim_name, inv_snr=inv_snr, noise_model=noise_model)                                                   
+                                       stim_name, size2=size2)
+    resp_train_trials, resp_test_trials = train_test_split_w_noise(resp_all, stim_name, \
+                                                                   inv_snr=inv_snr, noise_model=noise_model)                                                   
     
     #find reliably responsive neurons
-    cc_half_train_f = cache_folder / f'{layer_name}_cc_half_train_avg.csv'
-    idx_resp = reliable_neurons(resp_train_trials, cc_half_train_f, 
-                                                                             corr_thre, n_perm=n_perm)
+    #the cache is noise-model-specific (non-gaussian models get a suffix so they do
+    #not clobber the default gaussian caches)
+    noise_suffix = '' if noise_model == 'gaussian' else f'_{noise_model}'
+    cc_half_train_f = cache_folder / f'{layer_name}_cc_half_train_avg{noise_suffix}.csv'
+    idx_resp = reliable_neurons(resp_train_trials, cc_half_train_f, corr_thre, n_perm=n_perm)
 
     return resp_train_trials, resp_test_trials, xy_pos, idx_resp
 
@@ -130,13 +134,37 @@ def train_test_split_w_noise(resp_all, stim_name, inv_snr=0, noise_model='gaussi
 
 def make_a_sampler(a, rng=None):
     """
-    a: (N,) neuron gain loadings from data
-    Returns: sample_a(M) -> (M,)
+    Create a sampler for neuron gain loadings.
+
+    Parameters
+    ----------
+    a : np.ndarray
+        neuron gain loadings of shape (n_neurons,)
+    rng : np.random.Generator or None, default=None
+        random number generator used for sampling
+
+    Returns
+    -------
+    sample_a : callable
+        function that samples M gain loadings and returns an array of shape (M,)
     """
     rng = np.random.default_rng() if rng is None else rng
     a = np.asarray(a).ravel()
 
     def sample_a(M):
+        """
+        Sample neuron gain loadings with replacement.
+
+        Parameters
+        ----------
+        M : int
+            number of gain loadings to sample
+
+        Returns
+        -------
+        a_samp : np.ndarray
+            sampled gain loadings of shape (M,)
+        """
         a_samp = rng.choice(a, size=M, replace=True)
 
         # enforce sign convention (optional)
@@ -149,11 +177,23 @@ def make_a_sampler(a, rng=None):
 
 def add_mult_gain(x, g, sample_a):
     """
-    x: (M, n_stim)
-    g: (n_stim, n_trials)
-    Returns:
-      y_trials: (M, n_stim, n_trials)
-      a_samp: (M,)
+    Add multiplicative gain to stimulus responses.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        response array of shape (M, n_stim)
+    g : np.ndarray
+        stimulus-by-trial gain factors of shape (n_stim, n_trials)
+    sample_a : callable
+        function that takes M and returns sampled gain loadings of shape (M,)
+
+    Returns
+    -------
+    x_trials : np.ndarray
+        response array with multiplicative gain of shape (M, n_stim, n_trials)
+    a_samp : np.ndarray
+        sampled gain loadings of shape (M,)
     """
     x = np.asarray(x)
     g = np.asarray(g)
@@ -191,12 +231,12 @@ def model_responses(model_name, layer_name, stim_root, stim_name, size2):
     Returns
     -------
     resp_all : np.ndarray
-        array of size (n_neurons, n_stim*n_rot*n_trials) containing responses
+        array of size (n_neurons, n_stim*n_rot) containing responses
     xy_pos : np.ndarray
         array of size (n_neurons, 2) containing spatial positions
     """
     #load images and transform
-    img_all_sorted = load_img_sorted(stim_root, stim_name)    
+    img_all_sorted = load_img_sorted(stim_root, stim_name)
     img_all_transfo = standard_img_transform(img_all_sorted, size2=size2)
 
     #load unit responses and positions
@@ -204,11 +244,19 @@ def model_responses(model_name, layer_name, stim_root, stim_name, size2):
         resp_all, xy_pos = pixel_responses(img_all_transfo)
     elif model_name=='alexnet':
         resp_all, xy_pos = alexnet_responses(layer_name, img_all_transfo)
+    elif model_name=='random_alexnet':
+        resp_all, xy_pos = alexnet_responses(layer_name, img_all_transfo, pretrained=False)
+    elif model_name.startswith('alt_alexnet'):
+        check_point_name = model_name[12:]
+        checkpoint_path = stim_root.parent.parent / 'cache' / 'more_anns' / check_point_name / 'best_model.pth'
+        if not checkpoint_path.exists():
+            raise ValueError(f'Alternative AlexNet model should be saved as {checkpoint_path}')
+        resp_all, xy_pos = alt_alexnet_responses(checkpoint_path, layer_name, img_all_transfo)
     else:
         raise ValueError('Model not supported')
     
     #select units with xy_pos on the potentially resized image
-    idx_center = np.where( (np.abs(xy_pos[:,0])<=size2/112) & (np.abs(xy_pos[:,1])<=size2/112) & (resp_all.std(1)>0) )[0]
+    idx_center = np.where( (np.abs(xy_pos[:,0])<=size2/112) & (np.abs(xy_pos[:,1])<=size2/112) )[0] #& (resp_all.std(1)>0)
 
     return resp_all[idx_center], xy_pos[idx_center]
 
@@ -255,9 +303,9 @@ def pixel_responses(img_all):
     Returns
     -------
     resp_all : np.ndarray
-        array of size (n_all, n_y*n_x) containing pixel values
+        array of size (n_y*n_x, n_all) containing pixel responses (red channel)
     xy_pos : np.ndarray
-        array of size (n_y*n_x, 2) containing pixel values
+        array of size (n_y*n_x, 2) containing spatial positions
     """
     resp_all = ( img_all[:,0].reshape((img_all.shape[0],img_all.shape[2]*img_all.shape[3])) ).T
     xy_pos = spatial_positions(img_all.shape[3]*img_all.shape[2], 1)
@@ -285,9 +333,9 @@ def mid_getter_responses(mid_getter, img_all, layer_name, n_channels, n_features
         number of features in corresponding layer
 
     Returns
-    ------- 
+    -------
     resp_all : np.array
-        array of size (n_all, n_channels, n_features) containing intermediate responses
+        array of size (n_channels*n_features, n_all) containing intermediate responses
     """
     resp_all = np.zeros((img_all.shape[0],n_channels,n_features))
     for i in range(img_all.shape[0]):
@@ -299,9 +347,59 @@ def mid_getter_responses(mid_getter, img_all, layer_name, n_channels, n_features
     return resp_all
 
 
-def alexnet_responses(layer_name, img_all):
+def alt_alexnet_responses(checkpoint_path, layer_name, img_all):
     """
-    Responses of all artificial units in layer layer_name of AlexNet 
+    Responses of all artificial units in layer layer_name of AlexNet
+    with weights defined by checkpoint_path
+    to images in img_all and their spatial positions.
+
+    Parameters
+    ----------
+    checkpoint_path : pathlib.Path
+        path to the checkpoint file (best_model.pth)
+    layer_name : str
+        name of the intermediate layer
+    img_all : np.array
+        array of size (n_all, 3, n_y, n_x) where
+        n_all is the number of images
+        3 is for RGB channels
+        n_y and n_x are the dimensions of the images
+
+    Returns
+    -------
+    resp_all : np.array
+        array of size (n_channels*n_features, n_all) containing intermediate responses
+    xy_pos : np.array
+        array of size (n_channels*n_features, 2) containing spatial positions
+    """
+    #default weights are for pretraining on ImageNet
+    extractor = FeatureExtractor(checkpoint_path)
+    #conversion from feature name to layer name
+    layer_dict = {
+    'conv1': 'backbone.features.0',
+    'conv2': 'backbone.features.3',
+    'conv3': 'backbone.features.6',
+    'conv4': 'backbone.features.8',
+    'conv5': 'backbone.features.10',
+    }
+
+    backbone_layer = layer_dict[layer_name]
+    activations = extractor.extract_activations(img_all, layers=[backbone_layer])
+    act = activations[backbone_layer]  # shape: (n_all, n_channels, H, W)
+
+    n_images = act.shape[0]
+    n_channels = act.shape[1]
+    n_features = act.shape[2] * act.shape[3]
+    resp_all = act.reshape((n_images, n_channels * n_features)).T
+
+    xy_pos = spatial_positions(n_features, n_channels)
+
+    return resp_all, xy_pos
+
+
+def alexnet_responses(layer_name, img_all, pretrained=True):
+    """
+    Responses of all artificial units in layer layer_name of AlexNet
     to images in img_all and their spatial positions.
 
     Parameters
@@ -312,17 +410,18 @@ def alexnet_responses(layer_name, img_all):
         array of size (n_all, 3, n_y, n_x) where
         n_all is the number of images
         3 is for RGB channels
-        n_y and n_x are the dimensions of the images    
+        n_y and n_x are the dimensions of the images
+    pretrained : bool, default=True
+        if True, use ImageNet-pretrained weights; if False, use random weights
 
     Returns
     -------
     resp_all : np.array
-        array of size (n_all, n_channels, n_features) containing intermediate responses
+        array of size (n_channels*n_features, n_all) containing intermediate responses
     xy_pos : np.array
         array of size (n_channels*n_features, 2) containing spatial positions
     """
-    #default weights are for pretraining on ImageNet
-    model = models.alexnet(weights='DEFAULT')
+    model = models.alexnet(weights='DEFAULT' if pretrained else None)
     #conversion from feature name to layer name
     return_layers = {
     'features.0': 'conv1',

@@ -1,0 +1,10 @@
+# Task 1: Classification with circular masks
+name: classification
+use_rotation_aug: false
+use_circular_mask: true
+rotation_quantization: null  # if set (e.g., 24), quantize rotation angles
+interpolation_order: 1  # 0=nearest, 1=bilinear, 3=bicubic
+pretrained_weights: null  # "imagenet", or path to a checkpoint file
+pretrained_layers: null  # null = all backbone layers, or prefix like "features" or "classifier.1"
+freeze_backbone: false  # if true, freeze loaded backbone layers
+unfreeze_at_epoch: null  # if set, unfreeze frozen backbone at this epoch

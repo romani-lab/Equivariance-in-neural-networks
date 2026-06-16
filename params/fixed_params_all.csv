@@ -1,0 +1,8 @@
+﻿name,value,description
+stimulus,stim_05-08-23,Stimulus set identifier (name of the stimulus file)
+corr_thre,0.1,Split-half correlation threshold for selecting reliably responsive neurons
+n_procs,20,Dimensionality of the equivariant subspace projection used for decoding
+n_neurons,4000,Number of neurons randomly subsampled per draw
+inv_snr,3.9,Inverse signal-to-noise ratio; noise std = sqrt(inv_snr) * response std
+n_max,100,Maximum number of random neuron subsamples per condition
+noise_model,gaussian,"Noise model added to responses (gaussian, poisson, or mult_gain)"

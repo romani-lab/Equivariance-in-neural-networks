@@ -46,6 +46,7 @@ def calculate_norm_dists(x):
     n_neurons = x.shape[0]
     center = x.mean(axis=2, keepdims=True)
 
+    # divide by sqrt(n_neurons) to make distance independent of dimensionality
     norm_dist_mean = np.linalg.norm(x - center, axis=0).mean() / np.sqrt(n_neurons)
     norm_dist_std = np.sqrt((np.linalg.norm(x - center, axis=0).std(axis=1)**2).mean()) / np.sqrt(n_neurons)
 
@@ -176,7 +177,7 @@ def compute_significance(results_df, alternative='greater'):
 
     Returns
     -------
-    pd.DataFrame
+    stat_df : pd.DataFrame
         DataFrame containing the Wilcoxon signed-rank test statistics and p-values.
     """
     stat_df = pd.DataFrame()
@@ -233,7 +234,7 @@ def find_eigendecomp(rot, tol=1e-10):
     Parameters
     ----------
     rot : np.ndarray
-        orthogonal matrix of shape (d, d)
+        special orthogonal matrix of shape (d, d)
     tol : float, default=1e-10
         tolerance for eigenvalues to be considered 0, in which case the corresponding 
         complex eigenvectors need not be complex conjugates of each other
@@ -241,16 +242,14 @@ def find_eigendecomp(rot, tol=1e-10):
     Returns
     -------
     evals : np.ndarray
-        ordered eigenphases of shape d
+        ordered eigenphases of shape (d,)
     evecs : np.ndarray
-        ordered eigenvectors of shape (d, d), each column is an eigenvector
+        ordered real eigenvectors of shape (d, d), each column is an eigenvector
     """
     dp = rot.shape[0]
 
     #find the traceless, antisymmetric generator matrix GM corresponding to the orthogonal matrix rot
-    #if det(rot) = 1 then GM = -1j*logm(rot)
-    #if det(rot) = -1 then shift the diagonal elements by pi/dp such that tr(GM) = 0
-    GM = -1j*logm(rot) + (np.linalg.det(rot)-1)/2 * np.pi/dp * np.identity(dp)
+    GM = -1j*logm(rot)
     #GM should be antisymmetric
     Gs = (GM-GM.T)/2
 
@@ -264,7 +263,7 @@ def find_eigendecomp(rot, tol=1e-10):
     for i in range( len(I)//2 ):
         if (np.abs(evals[2*i]) - np.abs(evals[2*i+1]) < 1e-6) & (evals[2*i] > 0):
             evals[2*i], evals[2*i+1] = evals[2*i+1], evals[2*i]
-            v[:,2*i], v[:,2*i+1] = v[:,2*i+1], v[:,2*i]
+            v[:,2*i], v[:,2*i+1] = v[:,2*i+1].copy(), v[:,2*i].copy()
 
     #convert complex eigenvectors, which come in complex conjugate pairs, to real eigenvectors
     #if the eigenvalue is close to zero, we take the real part of the eigenvector
@@ -290,10 +289,10 @@ def find_n_unique_perm(n_tot, n_perm):
     ----------
     n_tot : int
         number of integers to permute
-    n_perm : int    
-        number of permutations  
+    n_perm : int
+        number of permutations
 
-    Returns     
+    Returns
     -------
     id_all : np.ndarray
         array of shape (n_perm, n_tot)
@@ -313,21 +312,21 @@ def find_n_unique_perm(n_tot, n_perm):
 def find_kn_unique_samples(k, n, N):
     """
     From the integers 0 to n-1,
-    select N samples of k integers.
+    select N non-overlapping samples of k integers each.
 
     Parameters
     ----------
     k : int
-        number of integers to sample
+        number of integers per sample
     n : int
-        total range of integers available (starting from 0)
+        total number of integers available (0 to n-1)
     N : int
         number of samples
-    
+
     Returns
     -------
     id_all : np.ndarray
-        array of shape (N, k)
+        array of shape (N, k) containing the sampled indices
     """
     if N * k > n:
         raise ValueError(f"Need N*k <= n, but got N*k={N*k} > n={n}.")

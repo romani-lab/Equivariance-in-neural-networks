@@ -53,8 +53,15 @@ def recording_summary_all(model_df, params_df, project_root, verbose=True):
         cache_folder.mkdir(parents=True, exist_ok=True)
         print(f'Processing {model_name}')
 
+        # Check if all required outputs already exist in cache
+        pos_cache = cache_folder / f'reliable_{corr_thre}thre_pos.p'
+        sum_cache = cache_folder / f'reliable_{corr_thre}thre_summary.p'
+        if pos_cache.exists() and sum_cache.exists():
+            print(f'  {model_name}: all cached, skipping')
+            continue
+
         date = model_name[-10:]
-        resp_train_trials0, resp_test_trials0, xy_pos, _, idx_resp = \
+        resp_train_trials0, resp_test_trials0, xy_pos, idx_resp = \
             mouse_all_train_test_responses(data_root / date, model_name, \
                                         stim_root, stim_name, \
                                         monitor, corr_thre, cache_folder)
@@ -138,11 +145,11 @@ def calculate_simple_metrics(resp_train_trials0, resp_test_trials0, idx_resp, al
             area_neurons[ct:(ct+n_neurons[i])] = all_areas[i]
             cc_f = cache_folder / f'{all_areas[i]}_cc_half_test.csv'
             if cc_f.exists():
-                cc_half_test0[ct:(ct+n_neurons[i])] = np.loadtxt(cc_f, delimiter=',')[:,1]
+                cc_half_test0[ct:(ct+n_neurons[i])] = np.loadtxt(cc_f, delimiter=',').mean(1)
             else:
                 cc_half_test = corr_half(resp_test_trials0[idx_resp[idx_area]], n_perm=100).mean(-1)
                 np.savetxt(cc_f, cc_half_test, delimiter=',')
-                cc_half_test0[ct:(ct+n_neurons[i])] =  cc_half_test[:,1]
+                cc_half_test0[ct:(ct+n_neurons[i])] =  cc_half_test.mean(1)
             cc_f2 = cache_folder / f'{all_areas[i]}_cc_half_train.csv'
             if cc_f2.exists():
                 cc_half_train0[ct:(ct+n_neurons[i])] = np.loadtxt(cc_f2, delimiter=',').mean(1)
@@ -206,7 +213,7 @@ def find_area_neurons(retinotopy_f, area_name, idx_resp):
 
     Returns
     -------
-    idx : np.ndarray
+    idx_area : np.ndarray
         array of indices of idx_resp that are in area_name
     """
     #map area names to numbers used in retinotopy file
@@ -276,9 +283,9 @@ def mouse_all_train_test_responses(data_root, rec_name, stim_root, stim_name, mo
     return resp_train_trials_norm, resp_test_trials_norm, xy_pos, idx_resp
 
 
-def normalize_n_reorder_responses(resp, uspont, mu, std):  
+def normalize_n_reorder_responses(resp, uspont, mu, std, remove_gain=True):
     """
-    Normalize responses by z-scoring across neurons (attempt to remove global gain), 
+    Normalize responses by z-scoring across neurons (attempt to remove global gain),
     project out spontaneous activity, and reorder.
 
     Parameters
@@ -286,17 +293,21 @@ def normalize_n_reorder_responses(resp, uspont, mu, std):
     resp : np.ndarray
         array of size (n_trials, n_stim, n_neurons) containing responses
     uspont : np.ndarray
-        array of size (n_neurons, n_neurons) containing spontaneous PCs
+        array of size (n_neurons, n_pc) containing spontaneous activity PCs
     mu : np.ndarray
         array of size (n_neurons,) containing mean responses
     std : np.ndarray
         array of size (n_neurons,) containing standard deviation of responses
+    remove_gain : bool
+        If True (default), z-score across neurons per timepoint to remove
+        global multiplicative gain. If False, skip this step to preserve
+        gain structure (e.g. for fitting a multiplicative gain model).
 
     Returns
     -------
     resp_norm : np.ndarray
         array of size (n_neurons, n_stim, n_trials) containing normalized responses
-    """    
+    """
     #spontaneous PCs for orthogonal projection
     n_neurons = resp.shape[2]
     n_pc = uspont[0,:].size
@@ -307,11 +318,14 @@ def normalize_n_reorder_responses(resp, uspont, mu, std):
     resp_zscored = resp_zscored.reshape((resp.shape[0]*resp.shape[1],n_neurons)).T
     resp_proj = resp_zscored-Usp @ (Usp.T @ resp_zscored)
 
-    #normalize out global gain
-    resp_norm = zscore(resp_proj,0).reshape((n_neurons,resp.shape[0],resp.shape[1]))
+    if remove_gain:
+        #normalize out global gain
+        resp_norm = zscore(resp_proj,0).reshape((n_neurons,resp.shape[0],resp.shape[1]))
+    else:
+        resp_norm = resp_proj.reshape((n_neurons,resp.shape[0],resp.shape[1]))
     resp_norm = np.transpose(resp_norm,[0,2,1])
 
-    return resp_norm 
+    return resp_norm
 
 
 def sort_resp_by_train_test_trials(spks, istim, stim_root, stim_name, monitor=0):
@@ -333,9 +347,9 @@ def sort_resp_by_train_test_trials(spks, istim, stim_root, stim_name, monitor=0)
 
     Returns
     -------
-    resp_istim_train : np.ndarray
+    resp_sorted_train : np.ndarray
         array of size (n_trials_train, n_stim_train, n_neurons) containing responses for training trials
-    resp_istim_test : np.ndarray
+    resp_sorted_test : np.ndarray
         array of size (n_trials_test, n_stim_test, n_neurons) containing responses for testing trials
     """    
     n_rot, n_train, n_test = find_n_imgs(stim_name)

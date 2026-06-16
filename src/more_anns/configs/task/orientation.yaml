@@ -1,0 +1,15 @@
+# Task 2: Orientation regression
+name: orientation
+use_circular_mask: true
+model_type: siamese  # siamese or absolute (single image). Use similarity_layer=input for 6-channel early fusion.
+orientation_fusion: concat  # concat or product — how to combine Siamese embeddings
+similarity_layer: classifier.5  # backbone split point — layers after this become task-specific heads (e.g., classifier.0 for deep heads)
+angle_representation: sincos_ordered  # sincos_ordered, sincos_unordered, or cos
+orientation_activation: linear  # linear or tanh
+loss_type: mse  # mse or cosine
+rotation_quantization: null  # if set (e.g., 24), quantize rotation angles
+interpolation_order: 1  # 0=nearest, 1=bilinear, 3=bicubic
+pretrained_weights: null  # "imagenet", or path to a checkpoint file
+pretrained_layers: null  # null = all backbone layers, or prefix like "features" or "classifier.1"
+freeze_backbone: false  # if true, freeze loaded backbone layers
+unfreeze_at_epoch: null  # if set, unfreeze frozen backbone at this epoch

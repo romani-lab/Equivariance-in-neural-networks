@@ -3,7 +3,7 @@ from scipy.stats import zscore
 import pickle as pkl
 
 
-def save_average_resp_n_cc(resp_train_trials, resp_test_trials, cache_folder, layer_name):
+def save_average_resp_n_cc(resp_train_trials, resp_test_trials, cache_folder, layer_name, noise_suffix=''):
     """
     Save average responses and half correlations for training and testing images.
     For testing images, save one version including all trials and another with only the first two trials.
@@ -19,36 +19,39 @@ def save_average_resp_n_cc(resp_train_trials, resp_test_trials, cache_folder, la
         path to the folder where results will be saved
     layer_name : str
         name of the layer for which responses are saved
-        
+    noise_suffix : str, default=''
+        suffix appended to all cache filenames so non-gaussian noise models do not
+        clobber the default gaussian caches (e.g. '_mult_gain')
+
     Returns
     -------
     None
     """
-    avg_train_f = cache_folder / f'{layer_name}_avg_resp_train.p'
+    avg_train_f = cache_folder / f'{layer_name}_avg_resp_train{noise_suffix}.p'
     pkl.dump(resp_train_trials.mean(-1), open( avg_train_f, "wb" ) )
 
-    avg_test_f = cache_folder / f'{layer_name}_avg_resp_test.p'
+    avg_test_f = cache_folder / f'{layer_name}_avg_resp_test{noise_suffix}.p'
     pkl.dump(resp_test_trials.mean(-1), open( avg_test_f, "wb" ) )
 
-    avg_test2x_f = cache_folder / f'{layer_name}_avg_resp_test2x.p'
+    avg_test2x_f = cache_folder / f'{layer_name}_avg_resp_test2x{noise_suffix}.p'
     pkl.dump(resp_test_trials[:,:,:,:2].mean(-1), open( avg_test2x_f, "wb" ) )
 
-    cc_train_f = cache_folder / f'{layer_name}_cc_half_train.csv'
+    cc_train_f = cache_folder / f'{layer_name}_cc_half_train{noise_suffix}.csv'
     cc_half_train2x = corr_half(resp_train_trials).mean(-1)
     np.savetxt(cc_train_f, cc_half_train2x, delimiter=',')
 
-    cc_test_f = cache_folder / f'{layer_name}_cc_half_test.csv'
+    cc_test_f = cache_folder / f'{layer_name}_cc_half_test{noise_suffix}.csv'
     cc_half_test = corr_half(resp_test_trials).mean(-1)
     np.savetxt(cc_test_f, cc_half_test, delimiter=',')
 
-    cc_test2x_f = cache_folder / f'{layer_name}_cc_half_test2x.csv'
+    cc_test2x_f = cache_folder / f'{layer_name}_cc_half_test2x{noise_suffix}.csv'
     cc_half_test2x = corr_half(resp_test_trials[:,:,:,:2]).mean(-1)
     np.savetxt(cc_test2x_f, cc_half_test2x, delimiter=',')
 
 
 def reliable_neurons(resp_train_trials, cc_half_train_f, corr_thre, n_perm=100):
     """
-    Find index for responsive neurons
+    Find indices of reliably responsive neurons based on split-half correlation and nonzero variance.
 
     Parameters
     ----------

@@ -21,9 +21,9 @@ def load_img_sorted(stim_root, stim_name):
 
     Returns
     -------
-    img_all_transfo : np.ndarray
-        array of size n_all x 300 x 300
-    """    
+    img_all_square : np.ndarray
+        array of size (n_all, 300, 300) containing grayscale images (uint8)
+    """
     if stim_name=='stim_05-08-23':
         dat = io.loadmat(stim_root / (stim_name+'.mat'), squeeze_me=True)
         idx_train, idx_test = find_sort_idx(stim_root, stim_name)   
@@ -50,16 +50,15 @@ def standard_img_transform(img_all, size2):
     Parameters
     ----------
     img_all : np.ndarray
-        array of size n_all x n_y x n_x where
-        n_all is the number of images
-        n_y and n_x are the dimensions of the images
+        array of size (n_all, n_y, n_x) containing grayscale images
     size2 : int
-        half width of the image, used for scaling down 
-    
+        half width of the image after scaling down;
+        if size2 < 112, the image is resized to (2*size2, 2*size2) and centered on a gray background
+
     Returns
     -------
     img_all_transfo : np.ndarray
-        array of size n_all x 3 x 224 x 224
+        array of size (n_all, 3, 224, 224) containing normalized RGB images (float32)
     """
     #scale down image
     transform2 = transforms.Resize((2*size2,2*size2))

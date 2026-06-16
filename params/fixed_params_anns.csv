@@ -1,0 +1,8 @@
+﻿name,value,description
+stimulus,stim_05-08-23,
+corr_thre,0.1,
+n_procs,20,
+n_neurons,250,
+inv_snr,3.9,
+n_max,100,
+noise_model,gaussian,
