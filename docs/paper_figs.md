@@ -4,6 +4,8 @@ Mapping of each paper figure panel to the result file it is built from and the n
 
 Pure-schematic panels (no repo-generated file) are listed with an empty results file and marked "schematic" in the notes.
 
+## Main figures
+
 | paper figure | results file | notebook | notes |
 | --- | --- | --- | --- |
 | Fig 1c left | results/stim_05-08-23_example_images.pdf | plot_figures.ipynb |  |
@@ -27,6 +29,10 @@ Pure-schematic panels (no repo-generated file) are listed with an empty results 
 | Fig 4b orange (stats) | results/pcorr_inv_significance.csv | plot_figures.ipynb | p-values |
 | Fig 4b brown (stats) | results/pcorr_tuned_significance.csv | plot_figures.ipynb | p-values |
 
+## Extended Data figures
+
+| paper figure | results file | notebook | notes |
+| --- | --- | --- | --- |
 | ED Fig 1a | results/mouse_summary/{model_name}_reliable_0.1thre_positions.pdf | plot_figures.ipynb | retinotopy maps; one per mouse |
 | ED Fig 1b | results/mouse_summary/{model_name}_reliable_0.1thre_CChalf.pdf | plot_figures.ipynb | one per mouse |
 | ED Fig 1b | results/mouse_summary/{model_name}_reliable_0.1thre_dp.pdf | plot_figures.ipynb | one per mouse |
@@ -81,6 +87,10 @@ Pure-schematic panels (no repo-generated file) are listed with an empty results 
 | ED Fig 10a | results_extended/data_fit/datafit_{delta_over_r,snr_hetero,sigma_calib,f_calib}.pdf | src/simulations.ipynb (plot_simulation.plot_datafit_params) | per population: δ/r and the per-neuron SNR spread measured per neuron subsample (simulation.datafit_params → data_fit_params.csv; pixels and conv layers drawn at 0, uniform SNR by construction), the calibrated noise σ = √inv_snr per seed of the data-fit simulations, and f = 1 − iid from the (N, d) sweep (simulation.best_iid / fill_swept → params/datafit_swept_iid.csv: pixels 1, V1 0.5, LM 0.7, RL 0.5, AL 0.6, conv1–3 0.8, conv4 0.7, conv5 0.4) |
 | ED Fig 10b | results_extended/data_fit/datafit_sim_{dim,svm1C,ori,cc}.pdf | src/simulations.ipynb (plot_simulation.plot_datafit_simulations) | the structure-matched populations at their swept f through the standard pipeline (N = 250, d = 20, 2 trials; simulation.run_target_cached → cache/simulation_datafit_sized, 10 seeds; datafit_table → data_fit_sim.csv) with the data overlaid; rows = invariant / tuned dimensions, image-identity error in the invariant subspace (C = 1), orientation error in the tuned subspace, median CC_norm |
 
+## Supplementary figures
+
+| paper figure | results file | notebook | notes |
+| --- | --- | --- | --- |
 | SI Fig 3a top | results_extended/ori1_refs.pdf | plot_extended_figures.ipynb |  |
 | SI Fig 3a bottom | results_extended/ori2_refs.pdf | plot_extended_figures.ipynb |  |
 | SI Fig 3b top | results_extended/ori1_refs_20dim.pdf | plot_extended_figures.ipynb |  |
