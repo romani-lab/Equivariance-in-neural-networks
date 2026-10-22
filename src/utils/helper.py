@@ -346,9 +346,9 @@ def band_summary(var_df, keys=(), inv_max=0.5, tuned_max=1.5, pc_weighted=False)
 
     One fit = one neuron subsample on one held-out pair, i.e. one group of
     keys + ['stim', 'sample']. Band membership is by |eigenphase| in units of the rotation
-    step: invariant |evals| < inv_max, tuned inv_max <= |evals| < tuned_max. Aggregating
-    per fit and only then averaging replaces the former rank-wise averaging of sorted
-    spectra across subsamples, which smeared a true eigenplane across rank slots.
+    step: invariant |evals| < inv_max, tuned inv_max <= |evals| < tuned_max. Counts and
+    variances are aggregated per fit and only then averaged across fits: averaging sorted
+    spectra rank by rank across subsamples would smear an eigenplane across rank slots.
 
     Parameters
     ----------

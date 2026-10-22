@@ -1,6 +1,6 @@
 # Paper figures — source files
 
-Mapping of each paper figure panel to the result file it is built from and the notebook/script that produces it. Kept in sync with paper_figs.xlsx.
+Mapping of each paper figure panel to the result file it is built from and the notebook/script that produces it.
 
 Pure-schematic panels (no repo-generated file) are listed with an empty results file and marked "schematic" in the notes.
 
