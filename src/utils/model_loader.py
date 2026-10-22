@@ -7,6 +7,23 @@ from utils.stimulus_loader import load_img_sorted, standard_img_transform, find_
 from utils.neuron_selectivity import reliable_neurons
 from more_anns.feature_extractor import FeatureExtractor
 
+RANDOM_ALEXNET_SEED = 0   # seed of the random-init AlexNet ('random_alexnet'), see alexnet_responses
+
+
+def is_model_row(model_name):
+    """Whether a params row is an ANN / pixel model (as opposed to a mouse recording).
+
+    Used as the shared gate in equivariance_functions, equivariance_validation and
+    decoder_functions so a new model prefix only has to be registered here.
+
+    Recognises: 'pixels', 'alexnet', 'random_alexnet', the trained AlexNet variants
+    ('alt_alexnet_*') and the CNNs with built-in equivariance ('eqv*': 'eqv-c15', 'eqv-c15r',
+    'eqv-c1'; checkpoint at cache/more_anns/<name>/best_model.pth).
+    """
+    return (model_name in ('pixels', 'alexnet', 'random_alexnet')
+            or model_name.startswith('alt_alexnet')
+            or model_name.startswith('eqv'))
+
 
 def model_train_test_responses(model_name, layer_name, stim_root, stim_name, size2, corr_thre, cache_folder, 
                                inv_snr=0, n_perm=100, noise_model='gaussian'):
@@ -100,7 +117,14 @@ def train_test_split_w_noise(resp_all, stim_name, inv_snr=0, noise_model='gaussi
 
     #add Gaussian noise with mean 0 and scale the train std by sigma0
     np.random.seed(4)
-    if noise_model=='gaussian':
+    if noise_model=='noiseless':
+        #inv_snr = 0 clean limit: repeat the deterministic responses across trials with no noise
+        #added. A distinct noise_model label (rather than gaussian + inv_snr=0) gives every cache
+        #its own '_noiseless' suffix so it never collides with the default (gaussian, inv_snr>0)
+        #caches. Split-half ceilings become 1, so CC_norm is the raw prediction correlation.
+        resp_train_trials = np.repeat(resp_train, n_trials_train).reshape((n_neurons, -1))
+        resp_test_trials = np.repeat(resp_test, n_trials_test).reshape((n_neurons, -1))
+    elif noise_model=='gaussian':
         dresp_train = np.array([np.random.normal(0, sigma0*resp_train[i].std(), n_train*n_rot*n_trials_train) for i in range(n_neurons)])
         dresp_test = np.array([np.random.normal(0, sigma0*resp_train[i].std(), n_test*n_rot*n_trials_test) for i in range(n_neurons)])
         resp_train_trials = np.repeat(resp_train, n_trials_train).reshape((n_neurons, -1)) + dresp_train
@@ -251,6 +275,14 @@ def model_responses(model_name, layer_name, stim_root, stim_name, size2):
         checkpoint_path = stim_root.parent.parent / 'cache' / 'more_anns' / check_point_name / 'best_model.pth'
         if not checkpoint_path.exists():
             raise ValueError(f'Alternative AlexNet model should be saved as {checkpoint_path}')
+        resp_all, xy_pos = alt_alexnet_responses(checkpoint_path, layer_name, img_all_transfo)
+    elif model_name.startswith('eqv'):
+        #equivariant CNN checkpoint (cache/more_anns/<network>/best_model.pth); the folder
+        #name is the full network name (e.g. eqv-c15). Reuses alt_alexnet_responses,
+        #whose only assumption is the layer_dict names and a (n_img, C, H, W) activation.
+        checkpoint_path = stim_root.parent.parent / 'cache' / 'more_anns' / model_name / 'best_model.pth'
+        if not checkpoint_path.exists():
+            raise ValueError(f'Equivariant CNN model should be saved as {checkpoint_path}')
         resp_all, xy_pos = alt_alexnet_responses(checkpoint_path, layer_name, img_all_transfo)
     else:
         raise ValueError('Model not supported')
@@ -421,6 +453,11 @@ def alexnet_responses(layer_name, img_all, pretrained=True):
     xy_pos : np.array
         array of size (n_channels*n_features, 2) containing spatial positions
     """
+    if not pretrained:
+        #fixed seed for the random-init network ('random_alexnet'), so that every analysis of
+        #the same row (reliable-unit selection, equivariance, validation, decoding) sees the
+        #same random weights and hence the same units
+        torch.manual_seed(RANDOM_ALEXNET_SEED)
     model = models.alexnet(weights='DEFAULT' if pretrained else None)
     #conversion from feature name to layer name
     return_layers = {

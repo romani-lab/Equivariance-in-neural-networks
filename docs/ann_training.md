@@ -97,6 +97,24 @@ The backbone is shared; `classifier.3` onward splits into a classification head 
 
 **Architecture:** Shared AlexNet backbone up to `classifier.3`, then parallel classification head (1000 classes) and MLP orientation head (2 outputs).
 
+## AlexNet-style networks with built-in rotation equivariance (SI Fig 6)
+
+Three further networks share the classification objective and recipe of the default AlexNet and differ only in the rotation symmetry built into their convolutional layers (`src/more_anns/equivariant_models.py`, built with the [escnn](https://github.com/QUVA-Lab/escnn) library, `pip install escnn==1.0.11`):
+
+| Experiment | Backbone key | Built-in symmetry |
+|------------|--------------|-------------------|
+| **eqv-c1** | `eqv_c1` | none (trivial group in every layer) |
+| **eqv-c15** | `eqv_c15` | exact equivariance to 24° rotations (C15) in every layer |
+| **eqv-c15r** | `eqv_c15_restricted` | relaxed across depth: C15 in conv1-2, C5 in conv3-4, C1 in conv5 |
+
+```bash
+python -m more_anns.train   task=classification   experiment=eqv-c15   task.backbone=eqv_c15   task.use_circular_mask=true   task.use_rotation_aug=false   training.num_epochs=90   training.batch_size=256   optimizer.lr=0.01   training.device=cuda
+```
+
+(`experiment=eqv-c15r task.backbone=eqv_c15_restricted` and `experiment=eqv-c1 task.backbone=eqv_c1` for the other two.) Every convolutional layer carries regular representations of its rotation group; there are no strided convolutions and no max-pooling (downsampling is anti-aliased average pooling, and the input is first anti-aliased-downsampled from 224×224 to 56×56 pixels), and the classification head group-pools the final feature maps before the AlexNet-style fully connected layers. Channel counts per layer match the default AlexNet as closely as possible. An escnn `R2Conv` costs about 2-3× a `Conv2d` of equal channel count, so budget more wall time than for the AlexNet variants.
+
+The checkpoints are read by the analysis pipeline through `params/model_params_eqv.csv` (rows `eqv-c15`, `eqv-c15r`, `eqv-c1`, conv1-5), i.e. `cache/more_anns/eqv-c15/best_model.pth` etc.; `src/more_anns_analyses.ipynb` produces SI Fig 6b-e from them.
+
 ## Configuration reference
 
 Key parameters and their defaults (from `src/more_anns/configs/`):

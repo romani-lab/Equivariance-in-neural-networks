@@ -125,3 +125,79 @@ def corr_half(resp, n_perm=100, tol=1e-6):
                 cc_half[idx_nonconst,i,ct] = (resp_tmp[0] * resp_tmp[1]).mean(0)
 
     return cc_half
+
+
+def direct_snr_stats(resp, cc_max=0.999):
+    """
+    Per-neuron single-trial SNR statistics from the first two trials, on the WHOLE response
+    vector (all stimuli x rotations). This is the exact inverse of the simulation's noise
+    definition (utils.simulation.make_population: noise_sd = sqrt(inv_snr) x the neuron's signal
+    std, gain multiplying the signal only, so SNR_i = g_i^2 / inv_snr), and the estimator of
+    gain_model_analyses.ipynb (inv_snr = (1 - cc) / cc of the whole-vector split-half cc).
+
+    Parameters
+    ----------
+    resp : np.ndarray
+        array of size (n_neurons, n_stim, n_rot, n_trials) single trials; trials 0 and 1 are used
+    cc_max : float, default=0.999
+        neurons whose implied whole-vector split-half cc = 1 / (1 + inv_snr) exceeds this are
+        (near-)noiseless units and are excluded from the per-neuron statistics
+
+    Returns
+    -------
+    stats : dict
+        'inv_snr'        mean over neurons of inv_snr_i = noise_var_i / signal_var_i (the value the
+                         simulation injects; mean, not median, as in the notebook estimate)
+        'inv_snr_median' median of inv_snr_i
+        'snr_hetero'     0.5 * sd over neurons of log(inv_snr_i) = sd of log g_i, the simulation's
+                         lognormal gain spread. Uniform-SNR populations (pixels / ANN layers with
+                         injected noise) return the estimator's own floor (~0.07), not 0
+        'inv_snr_rom'    ratio of means, mean(noise_var) / mean(signal_var) (population-level
+                         noise fraction, tail-weighted)
+        'mag_sd'         sd over neurons of log(signal std): the per-neuron MAGNITUDE spread. This
+                         is what the earlier data-fit called gain_sd; it is not an SNR spread (it is
+                         ~0.7-0.95 for the uniform-SNR pixels / ANN layers)
+        'n'              neurons entering the per-neuron statistics
+    """
+    n = resp.shape[0]
+    t0 = resp[..., 0].reshape(n, -1)
+    t1 = resp[..., 1].reshape(n, -1)
+    sig_var = ((t0 - t0.mean(1, keepdims=True)) * (t1 - t1.mean(1, keepdims=True))).mean(1)
+    noise_var = ((t0 - t1) ** 2).mean(1) / 2.0
+    ok = (sig_var > 0) & (noise_var > 0)
+    out = dict(inv_snr=np.nan, inv_snr_median=np.nan, snr_hetero=np.nan, inv_snr_rom=np.nan, mag_sd=np.nan, n=0)
+    if not np.any(ok):
+        return out
+    out['inv_snr_rom'] = float(noise_var[ok].mean() / sig_var[ok].mean())
+    out['mag_sd'] = float(np.log(np.sqrt(sig_var[ok])).std())
+    isnr = noise_var[ok] / sig_var[ok]
+    isnr = isnr[1.0 / (1.0 + isnr) < cc_max]
+    if len(isnr):
+        out.update(inv_snr=float(isnr.mean()), inv_snr_median=float(np.median(isnr)),
+                   snr_hetero=float(0.5 * np.log(isnr).std()), n=int(len(isnr)))
+    return out
+
+
+def pooled_centred_r_half(resp):
+    """
+    Per-neuron split-half correlation of the first two trials pooled over all conditions after
+    within-stimulus centring (each trial's mean over rotations removed per stimulus): the noise
+    ceiling statistic of the centred CC_norm (utils.helper.pooled_scores with center=True).
+
+    Parameters
+    ----------
+    resp : np.ndarray
+        array of size (n_neurons, n_stim, n_rot, n_trials); trials 0 and 1 are used
+
+    Returns
+    -------
+    r_half : np.ndarray
+        array of size (n_neurons,); NaN for neurons without variance
+    """
+    n = resp.shape[0]
+    w0 = (resp[..., 0] - resp[..., 0].mean(2, keepdims=True)).reshape(n, -1)
+    w1 = (resp[..., 1] - resp[..., 1].mean(2, keepdims=True)).reshape(n, -1)
+    w0 = w0 - w0.mean(1, keepdims=True)
+    w1 = w1 - w1.mean(1, keepdims=True)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return (w0 * w1).sum(1) / np.sqrt((w0 ** 2).sum(1) * (w1 ** 2).sum(1))

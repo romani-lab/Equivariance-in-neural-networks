@@ -26,6 +26,10 @@ torch==2.2.2
 torchvision==0.17.2
 torch-intermediate-layer-getter
 
+# CNNs with built-in rotation equivariance (SI Fig 6; optional, imported only when such a
+# checkpoint is loaded): pip install escnn==1.0.11 (Linux; the pip install fails on Windows)
+# escnn==1.0.11
+
 # Training infrastructure
 hydra-core>=1.3
 omegaconf>=2.3

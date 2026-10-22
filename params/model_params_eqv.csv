@@ -1,0 +1,16 @@
+monitor,network,layer
+20,eqv-c15,conv1
+20,eqv-c15,conv2
+20,eqv-c15,conv3
+20,eqv-c15,conv4
+20,eqv-c15,conv5
+20,eqv-c15r,conv1
+20,eqv-c15r,conv2
+20,eqv-c15r,conv3
+20,eqv-c15r,conv4
+20,eqv-c15r,conv5
+20,eqv-c1,conv1
+20,eqv-c1,conv2
+20,eqv-c1,conv3
+20,eqv-c1,conv4
+20,eqv-c1,conv5

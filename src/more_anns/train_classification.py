@@ -42,6 +42,7 @@ class ClassificationTrainer(BaseTrainer):
         freeze_backbone: bool = False,
         unfreeze_at_epoch: int | None = None,
         hf_repo_id: str | None = None,
+        backbone: str = "alexnet",
     ):
         super().__init__(
             output_dir=output_dir,
@@ -69,17 +70,28 @@ class ClassificationTrainer(BaseTrainer):
             interpolation_order=interpolation_order,
         )
 
-        self.model = AlexNet(
-            task="classification",
-            num_classes=self.data_module.NUM_CLASSES,
-            pretrained_weights=pretrained_weights,
-            pretrained_layers=pretrained_layers,
-        )
+        # Backbone: default AlexNet, or an escnn CNN with built-in rotation equivariance (SI Fig 6).
+        # Equivariant backbones carry their own group-pooled FC head, so AlexNet's task head
+        # is not used; the trainer only needs (logits,) from forward, which both provide.
+        if backbone.startswith("eqv_c"):
+            from more_anns.equivariant_models import build_equivariant_alexnet
+            self.model = build_equivariant_alexnet(backbone, num_classes=self.data_module.NUM_CLASSES)
+        elif backbone == "alexnet":
+            self.model = AlexNet(
+                task="classification",
+                num_classes=self.data_module.NUM_CLASSES,
+                pretrained_weights=pretrained_weights,
+                pretrained_layers=pretrained_layers,
+            )
+        else:
+            raise ValueError(f"unknown backbone {backbone!r} (expected 'alexnet' or an equivariant_models.BACKBONES key: 'eqv_c15', 'eqv_c15_restricted', 'eqv_c1')")
 
         self.criterion = nn.CrossEntropyLoss()
 
         self.config = {
             "dataset": dataset,
+            "backbone": backbone,
+            "num_classes": self.data_module.NUM_CLASSES,
             "use_circular_mask": use_circular_mask,
             "use_rotation_aug": use_rotation_aug,
             "rotation_quantization": rotation_quantization,

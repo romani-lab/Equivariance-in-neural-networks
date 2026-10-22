@@ -56,6 +56,7 @@ def train(cfg: DictConfig) -> None:
             freeze_backbone=cfg.task.freeze_backbone,
             unfreeze_at_epoch=cfg.task.unfreeze_at_epoch,
             hf_repo_id=cfg.hf_repo_id,
+            backbone=cfg.task.get("backbone", "alexnet"),
         )
         trainer.train()
 

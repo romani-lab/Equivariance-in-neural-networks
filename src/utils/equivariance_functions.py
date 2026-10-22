@@ -2,19 +2,25 @@ import numpy as np
 import pandas as pd
 import pickle as pkl
 import os
-from scipy.stats import wilcoxon
 from sklearn.utils.extmath import randomized_svd
 from scipy.spatial.distance import pdist
 from concurrent.futures import ProcessPoolExecutor
 
-from utils.helper import find_kn_unique_samples, find_n_unique_perm, find_eigendecomp, \
+from utils.helper import find_kn_unique_samples, find_eigendecomp, \
     calculate_cc_norm, calculate_norm_dists, calculate_rel_center_dist
 from utils.neuron_selectivity import save_average_resp_n_cc
-from utils.model_loader import model_train_test_responses
+from utils.model_loader import model_train_test_responses, is_model_row
 from utils.data_loader import mouse_all_train_test_responses, find_area_neurons
 
 
-def equivariance_summary_all(model_df, params_df, project_root):
+def _n_workers():
+    """Worker count for the per-subsample process pools (N_WORKERS, default 4).
+    A value <= 1 runs the subsamples sequentially in-process, which avoids the per-pool
+    interpreter spawn cost on Windows (each pool re-imports the module chain)."""
+    return int(os.environ.get('N_WORKERS', 4))
+
+
+def equivariance_summary_all(model_df, params_df, project_root, subset=None):
     """
     Run equivariance analysis for all models and layers specified in model_df
     with parameters from params_df.
@@ -27,13 +33,20 @@ def equivariance_summary_all(model_df, params_df, project_root):
         dataframe containing parameters including 'n_neurons', 'n_max', 'n_procs'
     project_root : pathlib.Path
         path to the project root directory
+    subset : str or None, default=None
+        None: all 92 images with leave-two-out pairs (one scene + one texture). 'scenes' or
+        'textures': only the 46 images of that class (the 45 training images of the class
+        and its 80x test image), fitted with leave-one-image-out folds; caches and 'stim'
+        (the held-out image index within the class) get the suffix '_scenes' / '_textures'
 
     Returns
     -------
     None
         saves results to CSV files in project_root / 'cache' / model_name:
-        - variance analysis: {layer_name}_var_dim_{n_neurons}avg_{d}dim.csv
-        - performance analysis: {layer_name}_equivariance_{n_neurons}avg_{d}dim.csv
+        - variance analysis: {layer_name}_var_dim_{n_neurons}avg_{d}dim.csv, one row per
+          (held-out pair 'stim', neuron subsample 'sample', dimension 'dim'); see
+          equivariance_quantification_parallel. Summarize with helper.band_summary.
+        Each cache is only computed when missing.
     """
     
     n_neurons = int(params_df.loc['n_neurons'].value)
@@ -43,8 +56,11 @@ def equivariance_summary_all(model_df, params_df, project_root):
     #non-gaussian noise models read/write suffixed caches (written by example_equiv_projs)
     #so they do not clobber the default gaussian caches
     noise_suffix = '' if noise_model == 'gaussian' else f'_{noise_model}'
+    if subset not in (None, 'scenes', 'textures'):
+        raise ValueError(f"subset must be None, 'scenes' or 'textures', got {subset!r}")
+    out_suffix = noise_suffix + (f'_{subset}' if subset else '')
 
-    print(f'Starting equivariance analysis...')
+    print(f'Starting equivariance analysis...' + (f' ({subset} only)' if subset else ''))
     print(f'Parameters: n_neurons={n_neurons}, n_max={n_max}, d={d}')
 
     #loop over models & layers
@@ -54,68 +70,47 @@ def equivariance_summary_all(model_df, params_df, project_root):
         cache_folder = project_root / f'cache' / model_name
         print(f'Processing {model_name} {layer_name}')
 
-        # Check if all required outputs already exist in cache
-        var_cache = cache_folder / f'{layer_name}_var_dim_{n_neurons}avg_{d}dim{noise_suffix}.csv'
-        perf_cache = cache_folder / f'{layer_name}_equivariance_{n_neurons}avg_{d}dim{noise_suffix}.csv'
-        if var_cache.exists() and perf_cache.exists():
-            print(f'  {model_name} {layer_name}: all cached, skipping')
+        var_cache = cache_folder / f'{layer_name}_var_dim_{n_neurons}avg_{d}dim{out_suffix}.csv'
+        if var_cache.exists():
+            print(f'  {model_name} {layer_name}: cached, skipping')
             continue
 
         avg_train_f = cache_folder / f'{layer_name}_avg_resp_train{noise_suffix}.p'
         avg_test2x_f = cache_folder / f'{layer_name}_avg_resp_test2x{noise_suffix}.p'
-        cc_train_f = cache_folder / f'{layer_name}_cc_half_train{noise_suffix}.csv'
-        cc_test2x_f = cache_folder / f'{layer_name}_cc_half_test2x{noise_suffix}.csv'
-        if (avg_train_f.exists()==False) | (avg_test2x_f.exists()==False) | (cc_train_f.exists()==False) | (cc_test2x_f.exists()==False):
+        if (avg_train_f.exists()==False) | (avg_test2x_f.exists()==False):
             print(f'No average data found; run example_equiv_projs first')
             continue
         x_train_avg = pkl.load( open( avg_train_f, "rb" ) )
         x_test_avg = pkl.load( open( avg_test2x_f, "rb" ) )
-        cc_half_train = np.loadtxt(cc_train_f, delimiter=',')
-        cc_half_test = np.loadtxt(cc_test2x_f, delimiter=',')
 
         #combine train with test and initialize dataframes
         n_train = x_train_avg.shape[1]
         n_test = x_test_avg.shape[1]
         n_all = n_train + n_test
         x_all_avg = np.concatenate((x_train_avg, x_test_avg), axis=1)
-        cc_half_all = np.concatenate((cc_half_train, cc_half_test), axis=1)
         var_df = pd.DataFrame()
-        performance_df = pd.DataFrame()
 
-        #loop over pairs of images
-        for i in range(n_train // 2):
-
-            x_train_i = x_all_avg[:,(np.arange(n_all)!=i)&(np.arange(n_all)!=n_train//2+i)]
-            x_test_i = x_all_avg[:,[i, n_train//2+i]]       
-            cc_test_i = cc_half_all[:,[i, n_train//2+i]]
+        #leave-two-stimuli-out pairs (one COCO and one texture image; the final pair is
+        #the two 80x test images); 'stim' is the pair index. Images are ordered scenes
+        #(indices 0 .. n_train/2 - 1), textures (n_train/2 .. n_train - 1), then the 80x
+        #scene and texture. For a class subset, leave-one-image-out over that class.
+        if subset is None:
+            folds = [[a, b] for a, b in [(i, n_train // 2 + i) for i in range(n_train // 2)] + [(n_train, n_train + 1)]]
+            keep = np.arange(n_all)
+        else:
+            keep = (np.concatenate((np.arange(0, n_train // 2), [n_train])) if subset == 'scenes'
+                    else np.concatenate((np.arange(n_train // 2, n_train), [n_train + 1])))
+            folds = [[j] for j in keep]
+        for stim, held in enumerate(folds):
+            mask = np.isin(np.arange(n_all), keep) & ~np.isin(np.arange(n_all), held)
+            x_train_i = x_all_avg[:, mask]
+            x_test_i = x_all_avg[:, held]
 
             tmp_df = equivariance_quantification_parallel(x_train_i, x_test_i, n_neurons, d, n_max=n_max)
-            tmp_df['stim'] = i
+            tmp_df['stim'] = stim
             var_df = pd.concat((var_df, tmp_df), axis=0)
 
-            tmp_df, _, _ = equivariance_performance_parallel(x_train_i, x_test_i,
-                                                             cc_test_i, n_neurons, [d],
-                                                             verbose=False, n_shuffle=1, n_max=n_max)
-            tmp_df['stim'] = i
-            performance_df = pd.concat((performance_df, tmp_df), axis=0)
-
-        #final image pair
-        x_train_i = x_all_avg[:,(np.arange(n_all)!=n_train)&(np.arange(n_all)!=n_train+1)]
-        x_test_i = x_all_avg[:,[n_train, n_train+1]]       
-        cc_test_i = cc_half_all[:,[n_train, n_train+1]]
-
-        tmp_df = equivariance_quantification_parallel(x_train_i, x_test_i, n_neurons, d, n_max=n_max)
-        tmp_df['stim'] = n_train // 2
-        var_df = pd.concat((var_df, tmp_df), axis=0)
-
-        tmp_df, _, _ = equivariance_performance_parallel(x_train_i, x_test_i,
-                                                         cc_test_i, n_neurons, [d],
-                                                         verbose=False, n_shuffle=1, n_max=n_max)
-        tmp_df['stim'] = n_train // 2
-        performance_df = pd.concat((performance_df, tmp_df), axis=0)
-
-        var_df.to_csv(cache_folder / f'{layer_name}_var_dim_{n_neurons}avg_{d}dim{noise_suffix}.csv', index=False)
-        performance_df.to_csv(cache_folder / f'{layer_name}_equivariance_{n_neurons}avg_{d}dim{noise_suffix}.csv', index=False)
+        var_df.to_csv(var_cache, index=False)
         
 
 def example_equiv_projs(model_df, params_df, project_root):
@@ -176,7 +171,7 @@ def example_equiv_projs(model_df, params_df, project_root):
             print(f'  {model_name} {layer_name}: all cached, skipping')
             continue
 
-        if np.isin(model_name,['pixels','alexnet','random_alexnet']) or model_name.startswith('alt_alexnet'):
+        if is_model_row(model_name):
             resp_train_trials, resp_test_trials, _, idx_resp = model_train_test_responses(model_name, layer_name, \
                                                                                     stim_root, stim_name, \
                                                                                     monitor, corr_thre, cache_folder, \
@@ -220,8 +215,15 @@ def example_equiv_projs(model_df, params_df, project_root):
         x_train_trials_k = resp_train_trials[k_samp]
         x_test_trials_k = resp_test_trials[k_samp]
 
-        #fit equivariance model to trial-averaged training data
+        #fit equivariance model to trial-averaged training data. Normalize each neuron by its
+        #training-response std first, matching the quantification (compute_single_k_quantification);
+        #without this the example projections are fit on a different (raw) footing than the
+        #reported Fig 4b correlations and systematically understate the fit quality.
         x_train_k = x_train_trials_k.mean(-1)
+        std_norm = x_train_k.std(axis=(1, 2), keepdims=True)
+        idx_nonzero = std_norm.squeeze() > 0
+        x_train_k = x_train_k[idx_nonzero] / std_norm[idx_nonzero]
+        x_test_trials_k = x_test_trials_k[idx_nonzero] / std_norm[idx_nonzero][..., np.newaxis]
         proj, center, rot, rot_shift = calculate_proj_rot_shift(x_train_k, d)
         evals, eigenvec = find_eigendecomp(rot)        
         evals = evals / (2*np.pi/n_rot) #units of 2*pi/n_rot
@@ -387,6 +389,31 @@ def compute_single_k_quantification(args):
     
     #compute quantities for this sample
     proj, proj_shift, rot, rot_shift = calculate_proj_rot_shift(x_train_avg_k, d)
+    return per_dim_quantities(x_train_avg_k, x_test_avg_k, proj, proj_shift, rot, rot_shift)
+
+
+def per_dim_quantities(x_train_avg_k, x_test_avg_k, proj, proj_shift, rot, rot_shift, pc_train=True):
+    """
+    Per-dimension quantities of a fitted equivariance model (the body of
+    compute_single_k_quantification, shared with the vs-dimension runner of
+    equivariance_validation): eigenphases of rot in units of 2*pi/n_rot (ordered by
+    magnitude, find_eigendecomp), the share of the total (std-normalized) training and test
+    variance along each eigen-dimension, and the Pearson correlation between the projected
+    responses and the chain predictions along each eigen-dimension (training and test images;
+    the training correlation is skipped when pc_train is False, returning NaN).
+
+    Parameters
+    ----------
+    x_train_avg_k, x_test_avg_k : np.ndarray
+        std-normalized trial-averaged responses (n_neurons, n_stim, n_rot)
+    proj, proj_shift, rot, rot_shift : fitted model (calculate_proj_rot_shift on x_train_avg_k)
+
+    Returns
+    -------
+    evals_k, var_dim_train_k, var_dim_test_k, cc_train_k, cc_test_k : np.ndarray, each (d,)
+    """
+    d = rot.shape[0]
+    n_rot = x_train_avg_k.shape[2]
     evals_k, eigenvec = find_eigendecomp(rot)
     #units of 2*pi/n_rot
     evals_k = evals_k / (2*np.pi/n_rot)
@@ -400,20 +427,23 @@ def compute_single_k_quantification(args):
     var_dim_test_k = (s_diag_test**2) / var_tot_test
 
     #Pearson correlation across rotations and stimuli (need to reshape)
-    x_train_pred = calculate_predictions(x_train_avg_k, proj, proj_shift, rot, rot_shift)
     x_test_pred = calculate_predictions(x_test_avg_k, proj, proj_shift, rot, rot_shift)
-    x_train_avg_proj = np.einsum('ji,jkl->ikl', proj@eigenvec, x_train_avg_k-proj_shift[:,np.newaxis,np.newaxis])
-    x_train_pred_proj = np.einsum('ji,jkl->ikl', proj@eigenvec, x_train_pred-proj_shift[:,np.newaxis,np.newaxis])
     x_test_avg_proj = np.einsum('ji,jkl->ikl', proj@eigenvec, x_test_avg_k-proj_shift[:,np.newaxis,np.newaxis])
     x_test_pred_proj = np.einsum('ji,jkl->ikl', proj@eigenvec, x_test_pred-proj_shift[:,np.newaxis,np.newaxis])
-    cc_train_k = calculate_cc_norm(x_train_avg_proj.reshape((d, 1, -1)), 
-                                x_train_pred_proj.reshape((d, 1, -1)), 
+    cc_test_k = calculate_cc_norm(x_test_avg_proj.reshape((d, 1, -1)),
+                                x_test_pred_proj.reshape((d, 1, -1)),
                                 np.ones((d,1)))
-    cc_test_k = calculate_cc_norm(x_test_avg_proj.reshape((d, 1, -1)), 
-                                x_test_pred_proj.reshape((d, 1, -1)), 
-                                np.ones((d,1)))
-    
-    return evals_k, var_dim_train_k, var_dim_test_k, cc_train_k.mean(1), cc_test_k.mean(1)
+    if pc_train:
+        x_train_pred = calculate_predictions(x_train_avg_k, proj, proj_shift, rot, rot_shift)
+        x_train_avg_proj = np.einsum('ji,jkl->ikl', proj@eigenvec, x_train_avg_k-proj_shift[:,np.newaxis,np.newaxis])
+        x_train_pred_proj = np.einsum('ji,jkl->ikl', proj@eigenvec, x_train_pred-proj_shift[:,np.newaxis,np.newaxis])
+        cc_train_k = calculate_cc_norm(x_train_avg_proj.reshape((d, 1, -1)),
+                                    x_train_pred_proj.reshape((d, 1, -1)),
+                                    np.ones((d,1))).mean(1)
+    else:
+        cc_train_k = np.full(d, np.nan)
+
+    return evals_k, var_dim_train_k, var_dim_test_k, cc_train_k, cc_test_k.mean(1)
 
 
 def equivariance_quantification_parallel(x_train_avg, x_test_avg, n_neurons, d, n_max=1):
@@ -436,308 +466,43 @@ def equivariance_quantification_parallel(x_train_avg, x_test_avg, n_neurons, d, 
     Returns
     -------
     equivariance_df : pd.DataFrame
-        dataframe with columns 'evals', 'var train', 'var test', 'pc train', 'pc test'
+        one row per (neuron subsample, dimension) with columns 'sample', 'dim', 'evals',
+        'var train', 'var test', 'pc train', 'pc test'; dimensions are ordered by
+        |eigenphase| within each subsample (find_eigendecomp). Results are deliberately NOT
+        averaged across subsamples: averaging sorted spectra rank-wise smears a true
+        eigenplane across rank slots whenever noise planes fall above it in some subsamples
+        and below it in others. Band counts, band
+        variance sums and band correlation means must be computed per subsample
+        (helper.band_summary) and only then averaged.
     """
     #in case x_train.shape[0] is smaller than n_neurons
     n_neurons = min(n_neurons, x_train_avg.shape[0])
-    
-    #randomly sample neurons
+
+    #randomly sample neurons (disjoint subsamples)
     k_rand = np.min([np.max([x_train_avg.shape[0] // n_neurons, 1]), n_max])
     k_samp = find_kn_unique_samples(n_neurons, x_train_avg.shape[0], k_rand)
 
     #prepare arguments for parallel processing
     args_list = [(x_train_avg[k_samp[k]].copy(), x_test_avg[k_samp[k]].copy(), d) for k in range(k_rand)]
-    
-    #process k_rand samples in parallel
-    if k_rand <= 1:
-        #fallback to sequential processing for single sample
-        results = [compute_single_k_quantification(args_list[0])]
+
+    #process k_rand samples in parallel (sequentially for a single sample or a single worker)
+    n_workers = _n_workers()
+    if (k_rand <= 1) or (n_workers <= 1):
+        results = [compute_single_k_quantification(args) for args in args_list]
     else:
-        n_workers = int(os.environ.get('LSB_MAX_NUM_PROCESSORS', 4))
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
             results = list(executor.map(compute_single_k_quantification, args_list))
-    
-    #average aggregated results
-    evals = np.zeros(d)
-    var_dim_train = np.zeros(d)
-    var_dim_test = np.zeros(d)
-    cc_train = np.zeros(d)
-    cc_test = np.zeros(d)
-    for evals_k, var_dim_train_k, var_dim_test_k, cc_train_k, cc_test_k in results:
-        evals += evals_k / k_rand
-        var_dim_train += var_dim_train_k / k_rand
-        var_dim_test += var_dim_test_k / k_rand
-        cc_train += cc_train_k / k_rand
-        cc_test += cc_test_k / k_rand
 
-    equivariance_df = pd.DataFrame({
-                           'evals': evals,
-                           'var train': var_dim_train,
-                           'var test': var_dim_test,
-                           'pc train': cc_train,
-                           'pc test': cc_test
-                           })
+    #one row per (subsample, dimension); no averaging across subsamples
+    frames = []
+    for k, (evals_k, var_dim_train_k, var_dim_test_k, cc_train_k, cc_test_k) in enumerate(results):
+        frames.append(pd.DataFrame({'sample': k,
+                                    'dim': np.arange(d),
+                                    'evals': evals_k,
+                                    'var train': var_dim_train_k,
+                                    'var test': var_dim_test_k,
+                                    'pc train': cc_train_k,
+                                    'pc test': cc_test_k}))
+    equivariance_df = pd.concat(frames, axis=0, ignore_index=True)
 
     return equivariance_df
-
-
-def compute_single_k_performance(args):
-    """
-    Helper function to compute equivariance performance for a single sample of neurons.
-
-    Parameters
-    ----------
-    args : tuple
-        tuple containing (d, x_train_k, x_test_k, cc_max_test)
-
-    Returns
-    -------
-    n_nonan : int
-        number of non-NaN neurons
-    cc_all : np.ndarray
-        correlation coefficients for performance evaluation
-    """
-    d, x_train_k, x_test_k, cc_max_test_k = args
-
-    #normalize by std of training responses
-    std_norm = x_train_k.std(axis=(1,2), keepdims=True)
-    idx_nonzero = std_norm.squeeze() > 0
-    x_train_k = x_train_k[idx_nonzero] / std_norm[idx_nonzero]
-    x_test_k = x_test_k[idx_nonzero] / std_norm[idx_nonzero]
-    cc_max_test_k = cc_max_test_k[idx_nonzero]
-    
-    #fit equivariance model to training data
-    proj, proj_shift, rot, rot_shift = calculate_proj_rot_shift(x_train_k, d)
-    x_test_k_pred = calculate_predictions(x_test_k, proj, proj_shift, rot, rot_shift)
-
-    #compute performance quantities
-    cc_all = calculate_cc_norm(x_test_k.reshape((x_test_k.shape[0], 1, -1)), 
-                               x_test_k_pred.reshape((x_test_k_pred.shape[0], 1, -1)), 
-                               cc_max_test_k.mean(1).reshape((-1,1)))
-    idx_nan = np.where(np.isnan(cc_all.mean(1)))[0]
-    cc_all[idx_nan] = 0
-    n_nonan = x_train_k.shape[0]-len(idx_nan)
-        
-    return n_nonan, cc_all
-
-
-def equivariance_performance_parallel(x_train_avg, x_test_avg, cc_half_test, n_neurons, d_range, \
-                                      n_shuffle=100, n_max=1, verbose=False):
-    """
-    Evaluate equivariance model performance and test against shuffled fit.
-
-    Parameters
-    ----------
-    x_train_avg : np.ndarray
-        trial-averaged training responses of shape (n_neurons_tot, n_stim_train, n_rot)
-    x_test_avg : np.ndarray
-        trial-averaged testing responses of shape (n_neurons_tot, n_stim_test, n_rot)
-    cc_half_test : np.ndarray
-        half correlation for test stimuli of shape (n_neurons_tot, n_stim_test)
-    n_neurons : int
-        number of neurons to sample
-    d_range : list
-        list of dimensions to evaluate
-    n_shuffle : int, default=100
-        number of shuffle permutations for statistical testing
-    n_max : int, default=1
-        maximum number of random neuron samples
-    verbose : bool, default=False
-        whether to print performance metrics
-
-    Returns
-    -------
-    err_df : pd.DataFrame
-        performance results on actual data with columns 'dim', 'n_nonan', 'cc_mean'
-    err_df_perm : pd.DataFrame
-        performance results on shuffled data with columns 'dim', 'n_nonan', 'cc_mean'
-    p_vals_mean : np.ndarray
-        mean p-values across random samples, of shape (len(d_range),)
-    """
-    #in case x_train.shape[0] is smaller than n_neurons
-    n_neurons = min(n_neurons, x_train_avg.shape[0])
-    _, n_test, n_rot = x_test_avg.shape
-
-    #max correlation coefficient from half correlation
-    cc_max_test = np.sqrt(2*cc_half_test/(1+cc_half_test))
-    
-    #randomly sample neurons
-    k_rand = np.min([np.max([x_train_avg.shape[0] // n_neurons, 1]), n_max])
-    k_samp = find_kn_unique_samples(n_neurons, x_train_avg.shape[0], k_rand)
-    
-    #main computation
-    err_df = pd.DataFrame()
-    err_df_perm = pd.DataFrame()
-    id_perm_train = find_n_unique_perm(n_rot*x_train_avg.shape[1], n_shuffle)
-    id_perm_test = find_n_unique_perm(n_rot*n_test, n_shuffle)
-    p_vals = np.zeros((len(d_range), k_rand))
-    #loop over dimensions
-    for j in range(len(d_range)):
-        cc_all = np.zeros(k_rand, dtype=object)
-        cc_all_perm = np.zeros(k_rand, dtype=object)
-        #main computation
-        for i in range(n_shuffle+1):
-            x_train_k = x_train_avg
-            x_test_k = x_test_avg
-            if i>0:
-                x_train_k = ( x_train_k.reshape((x_train_avg.shape[0], -1))[:,id_perm_train[i-1]] ).reshape(x_train_avg.shape)
-                x_test_k = ( x_test_k.reshape((x_train_avg.shape[0], -1))[:,id_perm_test[i-1]] ).reshape(x_test_avg.shape)
-            
-            #prepare arguments for parallel processing
-            args_list = [(d_range[j], x_train_k[k_samp[k]].copy(), x_test_k[k_samp[k]].copy(), cc_max_test[k_samp[k]].copy()) 
-                         for k in range(k_rand)]
-            
-            #process k_rand samples in parallel
-            if k_rand <= 1:
-                #fallback to sequential processing for single sample
-                results = [compute_single_k_performance(args_list[0])]
-            else:
-                n_workers = int(os.environ.get('LSB_MAX_NUM_PROCESSORS', 4))
-                with ProcessPoolExecutor(max_workers=n_workers) as executor:
-                    results = list(executor.map(compute_single_k_performance, args_list))
-            
-            #collect and average results across parallel processes
-            if i==0:
-                errors_arr = np.zeros((1,3))
-                for k in range(k_rand):
-                    n_nonan, cc_all_k = results[k]
-                    errors_arr += [d_range[j], n_nonan, np.nanmean(cc_all_k[:,0])] / k_rand
-                    cc_all[k] = cc_all_k
-            elif i==1:
-                errors_arr = np.zeros((1,3))
-                for k in range(k_rand):
-                    n_nonan, cc_all_k = results[k]
-                    errors_arr += [d_range[j], n_nonan, np.nanmean(cc_all_k[:,0])] / k_rand / n_shuffle
-                    cc_all_perm[k] = cc_all_k / n_shuffle
-            else:
-                for k in range(k_rand):
-                    n_nonan, cc_all_k = results[k]
-                    errors_arr += [d_range[j], n_nonan, np.nanmean(cc_all_k[:,0])] / k_rand / n_shuffle
-                    cc_all_perm[k] += cc_all_k / n_shuffle
-            #add results to a DataFrame
-            if i==0:
-                tmp_df = pd.DataFrame(errors_arr, columns=['dim', 'n_nonan', 'cc_mean'])
-                tmp_df['dim'] = np.round(tmp_df['dim']).astype(int)
-                err_df = pd.concat([err_df, tmp_df], axis=0)
-                # err01_df = pd.concat([err01_df, tmp01_df], axis=0)
-                if verbose:
-                    print(f'Dimension: {d_range[j]}')
-                    print(f"Frac. of no-nan neurons: {tmp_df['n_nonan'].mean()/n_neurons:.2f} (data)")
-                    print(f"Mean CCnorm test: {tmp_df['cc_mean'].mean():.2f} (data)")
-            elif i==n_shuffle:
-                tmp_df = pd.DataFrame(errors_arr, columns=['dim', 'n_nonan', 'cc_mean'])
-                tmp_df['dim'] = np.round(tmp_df['dim']).astype(int)
-                err_df_perm = pd.concat([err_df_perm, tmp_df], axis=0)
-                for k in range(k_rand):
-                    p_vals[j,k] = wilcoxon(cc_all[k][:,0], cc_all_perm[k][:,0], alternative='greater')[1]
-                if verbose:
-                    print(f"Frac. of no-nan neurons: {tmp_df['n_nonan'].mean()/n_neurons:.2f} (shuffle)")
-                    print(f"Mean CCnorm test: {tmp_df['cc_mean'].mean():.2f} (shuffle)")
-                    print(f"pval: {np.nanmean(p_vals[j]):.2f}")
-
-    return err_df, err_df_perm, np.nanmean(p_vals, axis=1)
-
-
-def equivariance_ccnorm_vs_dim_all(model_df, params_df, project_root, d_range=None):
-    """
-    Compute the equivariance model's predictive CCnorm as a function of the fitted
-    subspace dimension d, for all models and layers specified in model_df.
-
-    For each model/layer the subspace dimension is swept over d_range. At every
-    dimension the equivariance model is fit on a leave-two-stimuli-out training set
-    and the normalized correlation (CCnorm) is evaluated on the two held-out
-    stimuli, exactly as equivariance_summary_all does at the single dimension d
-    (so the d == n_procs point reproduces the cached
-    {layer_name}_equivariance_{n_neurons}avg_{d}dim.csv result).
-
-    Parameters
-    ----------
-    model_df : pd.DataFrame
-        dataframe containing model specifications with columns 'network', 'layer', 'monitor'
-    params_df : pd.DataFrame
-        dataframe containing parameters including 'n_neurons', 'n_max', 'n_procs'
-    project_root : pathlib.Path
-        path to the project root directory
-    d_range : array-like, optional
-        subspace dimensions to evaluate. Defaults to np.arange(2, 61, 2), i.e.
-        even dimensions up to 60, as used for the preprint.
-
-    Returns
-    -------
-    None
-        saves results to CSV files in project_root / 'cache' / model_name:
-        {layer_name}_ccnorm_vs_dim_{n_neurons}avg_{d}dim.csv with columns
-        'dim', 'cc_mean', 'stim'.
-    """
-    n_neurons = int(params_df.loc['n_neurons'].value)
-    n_max = int(params_df.loc['n_max'].value)
-    d = int(params_df.loc['n_procs'].value)
-    if d_range is None:
-        #sweep even dimensions up to 60 (as in the preprint), independent of n_procs
-        d_range = np.arange(2, 61, 2)
-    d_range = [int(d0) for d0 in d_range]
-
-    print(f'Starting CCnorm-vs-dimension analysis...')
-    print(f'Parameters: n_neurons={n_neurons}, n_max={n_max}, d_range={d_range}')
-
-    #loop over models & layers
-    for i0 in range(model_df.shape[0]):
-        model_name = model_df['network'].values[i0]
-        layer_name = model_df['layer'].values[i0]
-        cache_folder = project_root / f'cache' / model_name
-        print(f'Processing {model_name} {layer_name}')
-
-        out_f = cache_folder / f'{layer_name}_ccnorm_vs_dim_{n_neurons}avg_{d}dim.csv'
-        if out_f.exists():
-            print(f'  {model_name} {layer_name}: cached, skipping')
-            continue
-
-        avg_train_f = cache_folder / f'{layer_name}_avg_resp_train.p'
-        avg_test2x_f = cache_folder / f'{layer_name}_avg_resp_test2x.p'
-        cc_train_f = cache_folder / f'{layer_name}_cc_half_train.csv'
-        cc_test2x_f = cache_folder / f'{layer_name}_cc_half_test2x.csv'
-        if (avg_train_f.exists()==False) | (avg_test2x_f.exists()==False) | (cc_train_f.exists()==False) | (cc_test2x_f.exists()==False):
-            print(f'No average data found; run example_equiv_projs first')
-            continue
-        x_train_avg = pkl.load( open( avg_train_f, "rb" ) )
-        x_test_avg = pkl.load( open( avg_test2x_f, "rb" ) )
-        cc_half_train = np.loadtxt(cc_train_f, delimiter=',')
-        cc_half_test = np.loadtxt(cc_test2x_f, delimiter=',')
-
-        #combine train with test
-        n_train = x_train_avg.shape[1]
-        n_test = x_test_avg.shape[1]
-        n_all = n_train + n_test
-        x_all_avg = np.concatenate((x_train_avg, x_test_avg), axis=1)
-        cc_half_all = np.concatenate((cc_half_train, cc_half_test), axis=1)
-
-        #neuron subsampling (same scheme as equivariance_performance_parallel)
-        n_neurons_l = min(n_neurons, x_all_avg.shape[0])
-        k_rand = int(np.min([np.max([x_all_avg.shape[0] // n_neurons_l, 1]), n_max]))
-
-        #leave-two-stimuli-out pairs, matching equivariance_summary_all
-        pair_idx = [(i, n_train // 2 + i) for i in range(n_train // 2)] + [(n_train, n_train + 1)]
-
-        out_df = pd.DataFrame()
-        for stim, (a, b) in enumerate(pair_idx):
-            mask = (np.arange(n_all) != a) & (np.arange(n_all) != b)
-            x_train_i = x_all_avg[:, mask]
-            x_test_i = x_all_avg[:, [a, b]]
-            cc_test_i = cc_half_all[:, [a, b]]
-            cc_max_test = np.sqrt(2 * cc_test_i / (1 + cc_test_i))
-            k_samp = find_kn_unique_samples(n_neurons_l, x_all_avg.shape[0], k_rand)
-
-            #sweep subspace dimension; cc averaged over neuron subsamples (no shuffle)
-            for d0 in d_range:
-                cc_d = 0.0
-                for k in range(k_rand):
-                    _, cc_all_k = compute_single_k_performance(
-                        (d0, x_train_i[k_samp[k]].copy(), x_test_i[k_samp[k]].copy(),
-                         cc_max_test[k_samp[k]].copy()))
-                    cc_d += np.nanmean(cc_all_k[:, 0]) / k_rand
-                out_df = pd.concat([out_df,
-                                    pd.DataFrame({'dim': [d0], 'cc_mean': [cc_d], 'stim': [stim]})],
-                                   axis=0)
-
-        out_df.to_csv(out_f, index=False)
-        print(f'  saved {out_f.name}')

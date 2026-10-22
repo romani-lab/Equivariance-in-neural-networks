@@ -9,7 +9,7 @@ from sklearn.utils.extmath import randomized_svd
 
 from utils.helper import find_kn_unique_samples, find_eigendecomp, calculate_effect_size, \
     calculate_norm_dists, calculate_rel_center_dist
-from utils.model_loader import model_train_test_responses
+from utils.model_loader import model_train_test_responses, is_model_row
 from utils.data_loader import mouse_all_train_test_responses, find_area_neurons
 from utils.equivariance_functions import calculate_proj_rot_shift, calculate_predictions
 from utils.stimulus_loader import find_n_imgs
@@ -105,7 +105,7 @@ def decode_all(model_df, params_df, project_root, c_range=[0.001], ref_index=0, 
 
         print(f'Processing {model_name} {layer_name}')
 
-        if np.isin(model_name,['pixels','alexnet','random_alexnet']) or model_name.startswith('alt_alexnet'):
+        if is_model_row(model_name):
             resp_train_trials, resp_test_trials, _, idx_resp = model_train_test_responses(model_name, layer_name, \
                                                                                     stim_root, stim_name, \
                                                                                     monitor, corr_thre, cache_folder, \
@@ -167,8 +167,8 @@ def decoder_effect_sizes(model_df, params_df, project_root, C0=0.001, C1=1):
     -------
     None
         saves effect size results to CSV files in project_root / 'results_extended':
-        - SVM decoding effect sizes: svm_effect_sizes_{n_procs}dim.csv
-        - orientation decoding effect sizes: ori_effect_sizes_{n_procs}dim.csv
+        - image-identity decoding effect sizes: class2x_effect_sizes_{n_procs}dim.csv
+        - relative-orientation decoding effect sizes: ori2x_effect_sizes_{n_procs}dim.csv
     """
     n_neurons = int(params_df.loc['n_neurons'].value)
     d = int(params_df.loc['n_procs'].value)
@@ -533,10 +533,10 @@ def proj12_n_norm(x_train, x_test):
     return x_test_proj
 
 
-def orientation2x_2d_decoder(x_train, n_neurons, rot_step=24, ref_index=0, 
-                             d=None, n_max=1, verbose=False, model=False):
+def orientation2x_2d_decoder(x_train, n_neurons, rot_step=24, ref_index=0,
+                             d=None, n_max=1, verbose=False, model=False, k_samp=None):
     """
-    Decode relative orientation from neuronal responses using 2D projection 
+    Decode relative orientation from neuronal responses using 2D projection
     with leave-one-out cross-validation.
 
     Parameters
@@ -557,12 +557,16 @@ def orientation2x_2d_decoder(x_train, n_neurons, rot_step=24, ref_index=0,
         whether to print performance metrics
     model : bool, default=False
         whether to run decoder on projected model predictions or projected recorded responses
+    k_samp : np.ndarray or None, default=None
+        explicit neuron index sets (n_samples, n_neurons); overrides n_max and the disjoint
+        sampling (used by the simulations to decode from the same neuron subsamples as the
+        equivariance fit)
 
     Returns
     -------
     results_df : pd.DataFrame
         dataframe with columns 'R2', 'res', 'class', 'ori'
-    """    
+    """
     _, n_train, n_rot = x_train.shape
 
     #independent variables for decoding
@@ -570,14 +574,18 @@ def orientation2x_2d_decoder(x_train, n_neurons, rot_step=24, ref_index=0,
     n_angles = len(angles)
     y_test = np.vstack([np.cos(angles*np.pi/180),np.sin(angles*np.pi/180)]).T
 
-    #randomly sample neurons
+    #randomly sample neurons (disjoint subsamples), unless explicit index sets are given
     n_neurons = min(n_neurons, x_train.shape[0])
-    k_rand = np.min([np.max([x_train.shape[0] // n_neurons, 1]), n_max])
-    k_samp = find_kn_unique_samples(n_neurons, x_train.shape[0], k_rand)
-
+    if k_samp is None:
+        k_rand = np.min([np.max([x_train.shape[0] // n_neurons, 1]), n_max])
+        k_samp = find_kn_unique_samples(n_neurons, x_train.shape[0], k_rand)
+    else:
+        k_samp = np.asarray(k_samp)
+        k_rand = k_samp.shape[0]
     results_df = pd.DataFrame()
-    r2_test = np.zeros(n_train*n_angles)
-    angle_err_test = np.zeros(n_train*n_angles)
+    #per-sample accumulators (nan for folds without a tuned plane), averaged over samples at the end
+    r2_test = np.zeros((k_rand, n_train*n_angles))
+    angle_err_test = np.zeros((k_rand, n_train*n_angles))
     ct = 0
     for k in range(k_rand):
         x_train_k_all = x_train[k_samp[k]].copy()
@@ -605,6 +613,10 @@ def orientation2x_2d_decoder(x_train, n_neurons, rot_step=24, ref_index=0,
                 eigenval_k = eigenval_k / (2*np.pi/n_rot) #units of 2*pi/n_rot
                 id1 = np.where( (np.abs(eigenval_k)>=.5)&(np.abs(eigenval_k)<1.5) )[0]
                 if len(id1)<2:
+                    #fewer than two tuned dimensions for this sample and fold: leave the fold
+                    #out of the mean (nan) instead of counting it as zero error
+                    r2_test[k, i*n_angles:(i+1)*n_angles] = np.nan
+                    angle_err_test[k, i*n_angles:(i+1)*n_angles] = np.nan
                     ct += 1
                     continue
                 eigenvec1 = eigenvec_k[:,id1]
@@ -626,17 +638,18 @@ def orientation2x_2d_decoder(x_train, n_neurons, rot_step=24, ref_index=0,
             #test R2 score
             u_test = ((y_test-x_test_rot.T)**2).sum()
             v_test = ((y_test-y_test.mean())**2).sum()
-            r2_test[i*n_angles:(i+1)*n_angles] += (1-u_test/v_test) / k_rand
+            r2_test[k, i*n_angles:(i+1)*n_angles] += (1-u_test/v_test)
 
             #test angle errors
             angle_test = np.arctan2(y_test[:,1],y_test[:,0])
-            angle_pred = np.arctan2(x_test_rot.T[:,1],x_test_rot.T[:,0])  
+            angle_pred = np.arctan2(x_test_rot.T[:,1],x_test_rot.T[:,0])
             angle_diff = np.abs(np.mod(angle_test-angle_pred+np.pi,2*np.pi)-np.pi)*180/np.pi
-            angle_err_test[i*n_angles:(i+1)*n_angles] += angle_diff / k_rand
+            angle_err_test[k, i*n_angles:(i+1)*n_angles] += angle_diff
 
+    #mean over neuron samples (nan-aware: folds without a tuned plane are left out)
     results_df = pd.DataFrame({
-        'R2': r2_test, 
-        'res': angle_err_test, 
+        'R2': np.nanmean(r2_test, 0),
+        'res': np.nanmean(angle_err_test, 0),
         'class': np.repeat(np.arange(n_train), n_angles),
         'ori': np.tile(np.arange(n_rot)[1:], n_train)
     })
@@ -707,6 +720,12 @@ def svm2x_train_test(c, x_train_k, n_rot_test, d=None, model=False):
         eigenval_k = eigenval_k / (2*np.pi/n_rot) #units of 2*pi/n_rot
         id0 = np.where(np.abs(eigenval_k)<0.5)[0]
         d0 = len(id0)
+        if d0 == 0:
+            #no invariant dimension recovered for this neuron sample (happens for strongly
+            #tuned populations, e.g. the exactly equivariant CNNs at conv1): the invariant-
+            #subspace decoder is undefined; return nan so that texture2x_svm_decoder_parallel
+            #leaves this sample out of the mean instead of crashing on a (0, n) reshape
+            return np.nan, np.full(len(y_test), np.nan), np.full(len(y_test), np.nan)
         eigenproj_k = proj_k@eigenvec_k[:,id0]
         if model:
             x_train_k_avg_pred = calculate_predictions(x_train_k_avg, proj_k, proj_k_shift, rot_k, rot_k_shift)
@@ -765,10 +784,10 @@ def compute_single_k_svm(args):
     return acc_train_k, acc_test_k, conf_test_k
 
 
-def texture2x_svm_decoder_parallel(x_train, n_neurons, c_range, 
-                                   d=None, model=False, n_max=1, verbose=False):
+def texture2x_svm_decoder_parallel(x_train, n_neurons, c_range,
+                                   d=None, model=False, n_max=1, verbose=False, k_samp=None):
     """
-    Decode image identity from neuronal responses using linear SVM 
+    Decode image identity from neuronal responses using linear SVM
     with leave-one-out cross-validation.
 
     Parameters
@@ -778,7 +797,7 @@ def texture2x_svm_decoder_parallel(x_train, n_neurons, c_range,
     n_neurons : int
         number of neurons to randomly sample
     c_range : list
-        list of SVM regularization parameters  
+        list of SVM regularization parameters
     d : int, default=None
         dimension for equivariant subspace projection
     model : bool, default=False
@@ -787,6 +806,10 @@ def texture2x_svm_decoder_parallel(x_train, n_neurons, c_range,
         maximum number of random neuron samples
     verbose : bool, default=False
         whether to print performance metrics
+    k_samp : np.ndarray or None, default=None
+        explicit neuron index sets (n_samples, n_neurons); overrides n_max and the disjoint
+        sampling (used by the simulations to decode from the same neuron subsamples as the
+        equivariance fit)
 
     Returns
     -------
@@ -795,38 +818,37 @@ def texture2x_svm_decoder_parallel(x_train, n_neurons, c_range,
     """
     #get dimensions
     _, n_train, n_rot, _ = x_train.shape
-
-    #randomly sample neurons
+    #randomly sample neurons (disjoint subsamples), unless explicit index sets are given
     n_neurons = min(n_neurons, x_train.shape[0])
-    k_rand = np.min([np.max([x_train.shape[0] // n_neurons, 1]), n_max])
-    k_samp = find_kn_unique_samples(n_neurons, x_train.shape[0], k_rand)
-    
+    if k_samp is None:
+        k_rand = np.min([np.max([x_train.shape[0] // n_neurons, 1]), n_max])
+        k_samp = find_kn_unique_samples(n_neurons, x_train.shape[0], k_rand)
+    else:
+        k_samp = np.asarray(k_samp)
+        k_rand = k_samp.shape[0]
     #main computation
     svm_df = pd.DataFrame()
     #loop over regularization parameters
     for c in c_range:
         #prepare arguments for parallel processing
         args_list = [(x_train[k_samp[k]].copy(), c, d, model) for k in range(k_rand)]
-        
+
         #process k_rand samples in parallel
         if k_rand <= 1:
             #fallback to sequential processing for single sample
             results = [compute_single_k_svm(args_list[0])]
         else:
             ctx = get_context("spawn")
-            n_workers = int(os.environ.get('LSB_MAX_NUM_PROCESSORS', 4))
+            n_workers = int(os.environ.get('N_WORKERS', 4))
             with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
                 results = list(executor.map(compute_single_k_svm, args_list))
-        
-        #aggregate mean results (across k_rand samples)
-        acc_train = np.zeros((n_rot, n_train))
-        acc_test = np.zeros((n_rot, n_train))
-        conf_test = np.zeros((n_rot, n_train))
-        for acc_train_k, acc_test_k, conf_test_k in results:
-            acc_train += acc_train_k / k_rand
-            acc_test += acc_test_k / k_rand
-            conf_test += conf_test_k / k_rand
-            
+
+        #aggregate mean results (across k_rand samples); nan-aware so that a sample whose
+        #estimated invariant subspace is empty (svm2x_train_test returns nan for d0 == 0) is
+        #left out of the mean instead of poisoning it -- identical to the plain mean otherwise
+        acc_train = np.nanmean(np.stack([r[0] for r in results]), axis=0)
+        acc_test = np.nanmean(np.stack([r[1] for r in results]), axis=0)
+        conf_test = np.nanmean(np.stack([r[2] for r in results]), axis=0)
         #add results to a DataFrame
         tmp_df = pd.DataFrame({
             'acc train': np.squeeze(acc_train.reshape((-1, 1))),

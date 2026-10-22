@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from pathlib import Path
 from plotly.subplots import make_subplots
 
-from utils.helper import compute_significance
+from utils.helper import compute_significance, load_var_dim, band_summary, band_summary_per_stim, band_summary_table
 from utils.stimulus_loader import load_img_sorted, find_n_imgs
 
 
@@ -16,6 +16,10 @@ MODEL_COLORS = {
     'alt_alexnet_rot-aug':     'rgba(44, 160, 44, 1)',
     'alt_alexnet_ori':         'rgba(227, 119, 194, 1)',
     'alt_alexnet_multi-task':  'rgba(214, 39, 40, 1)',
+    # AlexNet-style CNNs with built-in rotation equivariance (SI Fig 6)
+    'eqv-c15':                 'rgba(227, 119, 194, 1)',   # exact C_15 symmetry in every layer
+    'eqv-c15r':                'rgba(214, 39, 40, 1)',     # symmetry relaxed across layers (C15 > C5 > C1)
+    'eqv-c1':                  'rgba(0, 0, 0, 1)',         # no built-in symmetry (C1)
 }
 
 
@@ -62,8 +66,18 @@ def model_to_color(model_name):
 
 
 def plot_models_overlay(models, layers, get_y_err_fn, ylabel, height=120, width=320,
-                        yrange=None, y_dp=None, save_path=None, alpha=0.6):
-    """Plot each model as a colored line across layers (conv1-conv5).
+                        yrange=None, y_dp=None, save_path=None, alpha=0.4, style_fn=None,
+                        colors=None, get_y_err_fn_sub=None, dx=0.0):
+    """Plot each model as colored markers across layers (conv1-conv5).
+
+    Markers only (no connecting lines), at marker transparency ``alpha`` -- matching the
+    equivariant-CNN rotation-robustness panel (plot_rotation_robustness, alpha=0.4).
+
+    With ``get_y_err_fn_sub`` a second series per model is overlaid at the same x: the primary
+    series (e.g. the decoder in the full space) becomes ``alpha``-transparent diamonds and the
+    second (e.g. the same decoder in the estimated equivariant subspace) opaque circles drawn on
+    top, both in the model colour -- the full-space-vs-subspace convention of the simulation
+    panels (plot_simulation._overlay).
 
     Parameters
     ----------
@@ -86,37 +100,68 @@ def plot_models_overlay(models, layers, get_y_err_fn, ylabel, height=120, width=
     save_path : str or Path or None
         If given, save figure to this path.
     alpha : float
-        Transparency for lines/markers.
+        Marker transparency.
+    style_fn : callable or None
+        Optional Function(model) -> (marker_symbol, line_dash) to distinguish models
+        that share a colour (e.g. a square marker for random-init variants). Only the
+        marker symbol is used here (lines are not drawn); line_dash is ignored. If None,
+        every model is drawn with circle markers.
+    colors : dict or None
+        Optional {model: 'rgba(...)'} overriding the built-in model_to_color palette
+        (used by the equivariant-CNN overlays: eqv-c15 pink / eqv-c15r red / eqv-c1 black).
+        Models absent from the dict fall back to model_to_color.
+    get_y_err_fn_sub : callable or None
+        Optional second series, Function(model, layer) -> (y_value, error_value). When given,
+        ``get_y_err_fn`` is drawn as ``alpha``-transparent diamonds (style_fn symbols are not
+        applied) and this series as opaque circles on top. Missing values (nan) are skipped.
+    dx : float
+        Horizontal dodge between models (layer spacing = 1): model i of ``models`` is drawn at
+        x + (i - (n_models - 1) / 2) * dx, so the order of ``models`` is the left-to-right
+        order within each layer; both series of a model share its offset. 0 = no dodge.
 
     Returns
     -------
     fig : plotly.graph_objects.Figure
     """
+    #(extractor, marker symbol or None = style_fn/circle, marker alpha, marker size); with a
+    #second series the primary is drawn first (diamonds), then the circles of every model on top.
+    #single-series overlays (dim/pcorr/var/cc by_model) use size 6 to match the decoding panels'
+    #primary diamonds.
+    if get_y_err_fn_sub is None:
+        series = [(get_y_err_fn, None, alpha, 6)]
+    else:
+        series = [(get_y_err_fn, 'diamond', alpha, 6), (get_y_err_fn_sub, 'circle', 1.0, 5)]
+    offsets = {m: (i - (len(models) - 1) / 2) * dx for i, m in enumerate(models)}
     first = True
-    for model in models:
-        ys, errs = [], []
-        for layer in layers:
-            y, err = get_y_err_fn(model, layer)
-            ys.append(y)
-            errs.append(err)
+    for fn, symbol, a, sz in series:
+        for model in models:
+            ys, errs = [], []
+            for layer in layers:
+                y, err = fn(model, layer)
+                ys.append(y)
+                errs.append(err)
 
-        c = model_to_color(model)
-        c_alpha = c[:-2] + str(alpha) + ')'
-        df_i = pd.DataFrame({
-            'x': np.arange(len(layers)), 'y': ys,
-            'errx': 0.0, 'erry': errs,
-            'color': c, 'errcolor': c,
-        })
+            c = colors.get(model, model_to_color(model)) if colors is not None else model_to_color(model)
+            c_alpha = c[:-2] + str(a) + ')'
+            df_i = pd.DataFrame({
+                'x': np.arange(len(layers)) + offsets[model], 'y': ys,
+                'errx': 0.0, 'erry': errs,
+                'color': c, 'errcolor': c,
+            })
 
-        fig_i = plot_points_w_errorbars(df_i, lines=True, sz=5, height=height, width=width, alpha=alpha)
-        fig_i.data[0].marker.color = c_alpha
-        fig_i.data[0].line.color = c_alpha
+            fig_i = plot_points_w_errorbars(df_i, lines=False, sz=sz, height=height, width=width, alpha=alpha)
+            fig_i.data[0].marker.color = c_alpha
+            if symbol is not None:
+                fig_i.data[0].marker.symbol = symbol
+            elif style_fn is not None:
+                symbol_m, _dash = style_fn(model)
+                fig_i.data[0].marker.symbol = symbol_m
 
-        if first:
-            fig = fig_i
-            first = False
-        else:
-            fig.add_trace(fig_i.data[0])
+            if first:
+                fig = fig_i
+                first = False
+            else:
+                fig.add_trace(fig_i.data[0])
 
     fig.update_layout(yaxis_title=ylabel)
     fig.update_yaxes(title_standoff=0)
@@ -679,7 +724,7 @@ def plot_equivariance_distance_all(model_df, params_df, project_root, ymax=9, he
 
 def plot_equivariance_variance(model_df, params_df, project_root, height=150, width=680, \
                            color_inv='rgba(247, 148, 29, 1)', color_tuned='rgba(139, 94, 60, 1)', show_mice=True,
-                           results_folder=None):
+                           results_folder=None, subset=None):
     """
     Plot variance explained of invariant and tuned subspaces across layers.
 
@@ -733,24 +778,30 @@ def plot_equivariance_variance(model_df, params_df, project_root, height=150, wi
         #non-gaussian noise models read/write suffixed files so they do not clobber
         #the default gaussian caches and figures
         noise_suffix = '' if params_df.loc['noise_model'].value == 'gaussian' else f"_{params_df.loc['noise_model'].value}"
+        noise_suffix += f'_{subset}' if subset else ''   #class subset caches (equivariance_summary_all(subset=...))
         var_f = cache_folder / f'{layer_name}_var_dim_{n_neurons}avg_{d}dim{noise_suffix}.csv'
         if not var_f.exists():
             continue
-        tmp_df = pd.read_csv(var_f)
+        tmp_df = load_var_dim(var_f)
         tmp_df['model'] = model_name
         tmp_df['area'] = layer_name
         var_df = pd.concat([var_df, tmp_df.copy()], axis=0)
     var_df = var_df.reset_index(drop=True)
 
+    #band variance sums per fit (neuron subsample x held-out pair), averaged over subsamples
+    #per pair -- never rank-averaged across subsamples (helper.band_summary); the summary
+    #table also holds the across-subsample and single-fit standard deviations
+    stim_df = band_summary_per_stim(var_df, keys=['model','area'])
+    band_summary_table(var_df, keys=['model','area']).to_csv(
+        results_folder / f'var_{n_neurons}avg_{d}dim{noise_suffix}_summary.csv', index=False)
+
     #significance for invariant dimensions
-    inv_all_df = var_df[np.abs(var_df['evals'])<0.5]
-    inv_pc_df = inv_all_df.groupby(['model','area','stim'])['var test'].sum().reset_index()
+    inv_pc_df = stim_df[['model','area','stim','var test inv']].rename(columns={'var test inv': 'var test'})
     results_df = compute_significance(inv_pc_df.rename(columns={'var test': 'score'}), alternative='less')
     results_df.to_csv(results_folder / f'var_inv_significance{noise_suffix}.csv', index=False)
 
     #significance for tuned dimensions
-    tuned_all_df = var_df[(np.abs(var_df['evals'])>=0.5)&(np.abs(var_df['evals'])<1.5)]
-    tuned_pc_df = tuned_all_df.groupby(['model','area','stim'])['var test'].sum().reset_index()
+    tuned_pc_df = stim_df[['model','area','stim','var test tun']].rename(columns={'var test tun': 'var test'})
     results_df = compute_significance(tuned_pc_df.rename(columns={'var test': 'score'}), alternative='less')
     results_df.to_csv(results_folder / f'var_tuned_significance{noise_suffix}.csv', index=False)
     
@@ -814,9 +865,14 @@ def plot_equivariance_variance(model_df, params_df, project_root, height=150, wi
 
 def plot_equivariance_pcorr(model_df, params_df, project_root, height=150, width=680, ymax=0.75, \
                            color_inv='rgba(247, 148, 29, 1)', color_tuned='rgba(139, 94, 60, 1)', show_mice=True,
-                           results_folder=None):
+                           results_folder=None, subset=None, pc_weighted=True,
+                           overlay_params_df=None, alpha_faint=0.4, return_df=False):
     """
     Plot Pearson correlation of invariant and tuned subspaces across layers.
+
+    The band correlation of each fit is the variance-weighted mean over the band's dimensions
+    (pc_weighted=True, the paper's degrees of invariance and tuning, Fig 4b); pc_weighted=False
+    gives the plain mean over dimensions.
 
     Parameters
     ----------
@@ -846,6 +902,8 @@ def plot_equivariance_pcorr(model_df, params_df, project_root, height=150, width
     None
         saves plot as PDF files in project_root / 'results' / 'pcorr_{n_neurons}avg_{d}dim.pdf'
     """
+    if overlay_params_df is not None:   #N-overlay figures show area means only
+        show_mice = False
     n_neurons = int(params_df.loc['n_neurons'].value)
     d = int(params_df.loc['n_procs'].value)
     results_folder = _resolve_results_folder(project_root, results_folder, 'results')
@@ -870,34 +928,30 @@ def plot_equivariance_pcorr(model_df, params_df, project_root, height=150, width
         #non-gaussian noise models read/write suffixed files so they do not clobber
         #the default gaussian caches and figures
         noise_suffix = '' if params_df.loc['noise_model'].value == 'gaussian' else f"_{params_df.loc['noise_model'].value}"
+        noise_suffix += f'_{subset}' if subset else ''   #class subset caches (equivariance_summary_all(subset=...))
         var_f = cache_folder / f'{layer_name}_var_dim_{n_neurons}avg_{d}dim{noise_suffix}.csv'
         if not var_f.exists():
             continue
-        tmp_df = pd.read_csv(var_f)
+        tmp_df = load_var_dim(var_f)
         tmp_df['model'] = model_name
         tmp_df['area'] = layer_name
         var_df = pd.concat([var_df, tmp_df.copy()], axis=0)
     var_df = var_df.reset_index(drop=True)
 
+    #band correlation means per fit (neuron subsample x held-out pair), averaged over
+    #subsamples per pair -- never rank-averaged across subsamples (helper.band_summary);
+    #pairs whose band is empty in every subsample are dropped, as before
+    stim_df = band_summary_per_stim(var_df, keys=['model','area'], pc_weighted=pc_weighted)
+    band_summary_table(var_df, keys=['model','area'], pc_weighted=pc_weighted).to_csv(
+        results_folder / f'pcorr_{n_neurons}avg_{d}dim{noise_suffix}_summary.csv', index=False)
+
     #significance for invariant dimensions
-    inv_all_df = var_df[np.abs(var_df['evals'])<0.5]
-    inv_pc_df = inv_all_df.groupby(['model','area','stim'])['pc test'].mean().reset_index()
-    # closest_idx = inv_all_df.groupby(['model','area','stim'])['evals'].apply(\
-    #                 lambda x: x.abs().nsmallest(2).index).explode().values
-    # inv_pc_df = var_df.loc[closest_idx[::2], ['model','area', 'stim', 'pc test']].reset_index(drop=True)
-    # inv_pc_df['pc test'] += var_df.loc[closest_idx[1::2], 'pc test'].values
-    # inv_pc_df['pc test'] /= 2
+    inv_pc_df = stim_df[['model','area','stim','pc test inv']].rename(columns={'pc test inv': 'pc test'}).dropna()
     results_df = compute_significance(inv_pc_df.rename(columns={'pc test': 'score'}), alternative='less')
     results_df.to_csv(results_folder / f'pcorr_inv_significance{noise_suffix}.csv', index=False)
 
     #significance for tuned dimensions
-    tuned_all_df = var_df[(np.abs(var_df['evals'])>=0.5)&(np.abs(var_df['evals'])<1.5)]
-    tuned_pc_df = tuned_all_df.groupby(['model','area','stim'])['pc test'].mean().reset_index()
-    # closest_idx = tuned_all_df.groupby(['model','area','stim'])['evals'].apply(\
-    #                 lambda x: np.abs(x.abs()-1).nsmallest(2).index).explode().values
-    # tuned_pc_df = var_df.loc[closest_idx[::2], ['model','area', 'stim', 'pc test']].reset_index(drop=True)
-    # tuned_pc_df['pc test'] += var_df.loc[closest_idx[1::2], 'pc test'].values
-    # tuned_pc_df['pc test'] /= 2
+    tuned_pc_df = stim_df[['model','area','stim','pc test tun']].rename(columns={'pc test tun': 'pc test'}).dropna()
     results_df = compute_significance(tuned_pc_df.rename(columns={'pc test': 'score'}), alternative='less')
     results_df.to_csv(results_folder / f'pcorr_tuned_significance{noise_suffix}.csv', index=False)
     
@@ -951,17 +1005,57 @@ def plot_equivariance_pcorr(model_df, params_df, project_root, height=150, width
     if plot_df.empty:
         print(f'No data found.')
         return
+    if return_df:
+        return plot_df
+    if overlay_params_df is not None:
+        #semi-transparent layer at the other neuron count (same x, area means only), drawn
+        #first so the opaque params_df layer sits on top (SI N = 250 vs N = max figures)
+        over_df = plot_equivariance_pcorr(model_df, overlay_params_df, project_root, show_mice=False,
+                                          results_folder=results_folder, subset=subset, pc_weighted=pc_weighted, return_df=True)
+        plot_df = pd.concat([_faint(over_df, alpha_faint), plot_df], ignore_index=True)
     fig = plot_points_w_errorbars(plot_df, y_dp=None, sz=8, height=height, width=width, alpha=.6)
     fig.update_layout(yaxis_title='Pearson correlation (1)')
     tick_df = plot_df[~plot_df['area'].str.startswith('TX')]
     fig.update_xaxes(title_standoff=0, tickvals=tick_df['xtick'].unique(), ticktext=tick_df['area'].unique())
     fig.update_yaxes(title_standoff=0, range=[0,ymax])
-    fig.write_image(results_folder / f'pcorr_{n_neurons}avg_{d}dim{noise_suffix}.pdf', scale=1, engine='kaleido')
+    fig.write_image(results_folder / f'pcorr_{n_neurons}avg_{d}dim{noise_suffix}{_overlay_tag(overlay_params_df)}.pdf', scale=1, engine='kaleido')
+
+
+def _both_null_bands(model_df, project_root, tag):
+    """Chance recovered dimensions per band from the 'both' shuffle (image identity AND rotation
+    order destroyed), averaged over rows. This structureless null is ~flat across areas (~1.8
+    invariant, ~2.4 tuned dims -- it only reflects how many of the d fitted noise dimensions leak
+    into each |eigenphase| band), so a single value per band is a fair reference line. Reads the
+    precomputed results_extended/null_bands_{tag}.csv (plotting_validation.null_band_table) when
+    present, else recomputes from the raw {area}_var_dim_null_{tag}.csv caches (slow). Returns
+    (d_inv, d_tun), or (None, None) if neither is available."""
+    summ = project_root / 'results_extended' / f'null_bands_{tag}.csv'
+    if summ.exists():
+        s = pd.read_csv(summ)
+        if {'both d_inv', 'both d_tun'} <= set(s.columns) and s['both d_inv'].notna().any():
+            return float(s['both d_inv'].mean()), float(s['both d_tun'].mean())
+    d_inv, d_tun = [], []
+    for i0 in range(model_df.shape[0]):
+        f = project_root / 'cache' / model_df['network'].values[i0] / \
+            f"{model_df['layer'].values[i0]}_var_dim_null_{tag}.csv"
+        if not f.exists():
+            continue
+        nd = pd.read_csv(f, usecols=['kind', 'shuffle', 'stim', 'sample', 'evals'])
+        nd = nd[nd['kind'] == 'both']
+        if nd.empty:
+            continue
+        b = band_summary(nd, keys=['shuffle'])          #one fit per (shuffle, stim, sample)
+        d_inv.append(b['d_inv'].mean())
+        d_tun.append(b['d_tun'].mean())
+    if not d_inv:
+        return None, None
+    return float(np.mean(d_inv)), float(np.mean(d_tun))
 
 
 def plot_equivariance_dim(model_df, params_df, project_root, height=150, width=680, ymax=20, \
                            color_inv='rgba(247, 148, 29, 1)', color_tuned='rgba(139, 94, 60, 1)', show_mice=True,
-                           results_folder=None):
+                           mouse_gap_shift=0.10, results_folder=None, subset=None,
+                           overlay_params_df=None, alpha_faint=0.4, return_df=False):
     """
     Plot dimension of the invariant and tuned subspaces across layers.
 
@@ -993,6 +1087,8 @@ def plot_equivariance_dim(model_df, params_df, project_root, height=150, width=6
     None
         saves plot as PDF files in project_root / 'results' / 'dim_{n_neurons}avg_{d}dim.pdf'
     """
+    if overlay_params_df is not None:   #N-overlay figures show area means only
+        show_mice = False
     
     n_neurons = int(params_df.loc['n_neurons'].value)
     d = int(params_df.loc['n_procs'].value)
@@ -1005,11 +1101,14 @@ def plot_equivariance_dim(model_df, params_df, project_root, height=150, width=6
                       'TX111_V1': 1.05, 'TX111_LM': 2.05, 'TX111_RL': 3.05, 'TX111_AL': 4.05, \
                       'conv1': 5, 'conv2': 6, 'conv3': 7, 'conv4': 8, 'conv5': 9, \
                       }
-    #shift x-positions for invariant and tuned
-    color_to_dx_dict = {f'{color_inv}': -0.1, f'{color_tuned}': 0.1}
+    #shift x-positions for invariant and tuned (0.15 so that with the mouse_gap_shift below the
+    #tuned mouse cluster clears the invariant area mean: ... inv mice, gap, inv mean, tuned mice,
+    #gap, tuned mean ...)
+    color_to_dx_dict = {f'{color_inv}': -0.15, f'{color_tuned}': 0.15}
 
     #collect results across layers
     dim_df = pd.DataFrame()
+    var_all_df = pd.DataFrame()
     for i0 in range(model_df.shape[0]):
         model_name = model_df['network'].values[i0]
         layer_name = model_df['layer'].values[i0]
@@ -1018,22 +1117,30 @@ def plot_equivariance_dim(model_df, params_df, project_root, height=150, width=6
         #non-gaussian noise models read/write suffixed files so they do not clobber
         #the default gaussian caches and figures
         noise_suffix = '' if params_df.loc['noise_model'].value == 'gaussian' else f"_{params_df.loc['noise_model'].value}"
+        noise_suffix += f'_{subset}' if subset else ''   #class subset caches (equivariance_summary_all(subset=...))
         var_f = cache_folder / f'{layer_name}_var_dim_{n_neurons}avg_{d}dim{noise_suffix}.csv'
         if not var_f.exists():
             continue
-        tmp_df = pd.read_csv(var_f)
-        #find invariant and tuned dimensions
-        tmp_df['dim'] = 0.0
-        tmp_df['erry'] = 0.0
-        tmp_df.loc[0,'dim'] = tmp_df.groupby('stim')['evals'].apply(lambda x: (np.abs(x)<0.5).sum()).mean()
-        tmp_df.loc[0,'erry'] = tmp_df.groupby('stim')['evals'].apply(lambda x: (np.abs(x)<0.5).sum()).std()
-        tmp_df.loc[0,'erry'] = tmp_df.loc[0,'erry']/np.sqrt(tmp_df['stim'].nunique())
-        tmp_df.loc[1,'dim'] = tmp_df.groupby('stim')['evals'].apply(lambda x: ((np.abs(x)>=0.5)&(np.abs(x)<1.5)).sum()).mean()
-        tmp_df.loc[1,'erry'] = tmp_df.groupby('stim')['evals'].apply(lambda x: ((np.abs(x)>=0.5)&(np.abs(x)<1.5)).sum()).std()
-        tmp_df.loc[1,'erry'] = tmp_df.loc[1,'erry']/np.sqrt(tmp_df['stim'].nunique())
+        var_df = load_var_dim(var_f)
+        var_df['model'] = model_name
+        var_df['area'] = layer_name
+        var_all_df = pd.concat([var_all_df, var_df], axis=0)
+        #invariant and tuned dimension counts per fit (neuron subsample x held-out pair),
+        #averaged over subsamples per pair -- never counted on rank-averaged spectra
+        #(helper.band_summary); error bars are sems across held-out pairs, as before
+        stim_df = band_summary_per_stim(var_df)
+        n_stim = stim_df['stim'].nunique()
+        tmp_df = pd.DataFrame({'dim': [stim_df['d_inv'].mean(), stim_df['d_tun'].mean()],
+                               'erry': [stim_df['d_inv'].std()/np.sqrt(n_stim), stim_df['d_tun'].std()/np.sqrt(n_stim)]})
         tmp_df['model'] = model_name
         tmp_df['area'] = layer_name
-        dim_df = pd.concat([dim_df, tmp_df.iloc[:2].reset_index(names='cat')], axis=0)  
+        dim_df = pd.concat([dim_df, tmp_df.reset_index(names='cat')], axis=0)
+
+    #summary table with the single-fit and across-subsample standard deviations
+    if not dim_df.empty:
+        table_df = band_summary_table(var_all_df, keys=['model','area'])
+        table_df[table_df['quantity'].isin(['d_inv','d_tun'])].to_csv(
+            results_folder / f'dim_{n_neurons}avg_{d}dim{noise_suffix}_summary.csv', index=False)
 
     #find means and sems
     plot_df = dim_df.groupby(['area','cat'])['dim'].mean().reset_index()
@@ -1063,7 +1170,17 @@ def plot_equivariance_dim(model_df, params_df, project_root, height=150, width=6
     plot_df.loc[idx_tuned,'color'] = color_tuned
     plot_df['errcolor'] = 'rgba(200, 200, 200, 1.0)'
     plot_df['y'] = plot_df['dim']
-    plot_df['x'] = [area_to_x_dict[area] + color_to_dx_dict[color] for area, color in zip(plot_df['area'], plot_df['color'])]
+    #mouse markers sit left of their area mean; shift the whole mouse cluster left by
+    #mouse_gap_shift so the right-most mouse is further from the pooled mean, keeping the
+    #inter-mouse spacing unchanged (right-most gap 0.05 -> 0.15 at the default 0.10 shift),
+    #as in plot_ccnorm_pooled_equiv. In the mouse areas the invariant area mean sits between
+    #the two mouse clusters, so there the whole tuned family is additionally pushed right so
+    #the left-most tuned mouse marker clears the invariant mean.
+    mouse_areas = ('V1', 'LM', 'RL', 'AL')
+    plot_df['x'] = [area_to_x_dict[area] + color_to_dx_dict[color]
+                    - (mouse_gap_shift if area.startswith('TX') else 0)
+                    + (0.10 if (color == color_tuned and area.split('_')[-1] in mouse_areas) else 0)
+                    for area, color in zip(plot_df['area'], plot_df['color'])]
     plot_df['xtick'] = [area_to_x_dict[area] for area in plot_df['area']]
     plot_df.sort_values('x', inplace=True)
     plot_df['errx'] = 0
@@ -1071,243 +1188,26 @@ def plot_equivariance_dim(model_df, params_df, project_root, height=150, width=6
     if plot_df.empty:
         print(f'No data found.')
         return
+    if return_df:
+        return plot_df
+    if overlay_params_df is not None:
+        #semi-transparent layer at the other neuron count (same x, area means only), drawn
+        #first so the opaque params_df layer sits on top (SI N = 250 vs N = max figures)
+        over_df = plot_equivariance_dim(model_df, overlay_params_df, project_root, show_mice=False, mouse_gap_shift=mouse_gap_shift,
+                                        results_folder=results_folder, subset=subset, return_df=True)
+        plot_df = pd.concat([_faint(over_df, alpha_faint), plot_df], ignore_index=True)
     fig = plot_points_w_errorbars(plot_df, sz=8, height=height, width=width, alpha=.6)
+    #chance dimension per band from the 'both' shuffle (structureless null, ~flat across areas):
+    #invariant (orange) ~1.8, tuned (brown) ~2.4 -- dotted reference lines like the decoding figures
+    null_inv, null_tun = _both_null_bands(model_df, project_root, f'{n_neurons}avg_{d}dim{noise_suffix}')
+    if null_inv is not None:
+        fig.add_hline(y=null_inv, line_width=1, line_color=color_inv, opacity=.8, line_dash='dot')
+        fig.add_hline(y=null_tun, line_width=1, line_color=color_tuned, opacity=.8, line_dash='dot')
     fig.update_layout(yaxis_title='dimension (1)')
     tick_df = plot_df[~plot_df['area'].str.startswith('TX')]
     fig.update_xaxes(title_standoff=0, tickvals=tick_df['xtick'].unique(), ticktext=tick_df['area'].unique())
     fig.update_yaxes(title_standoff=0, range=[0,ymax], tickvals=[0,10,20], ticktext=['0','10','20'])
-    fig.write_image(results_folder / f'dim_{n_neurons}avg_{d}dim{noise_suffix}.pdf', scale=1, engine='kaleido')
-
-
-def plot_equivariance_ccnorm(model_df, params_df, project_root, height=150, width=680, ymax=0.25, \
-                           color_pts='rgba(140, 140, 140, 1)', color_err='rgba(169, 169, 169, 1.0)', show_mice=True,
-                           results_folder=None):
-    """
-    Plot normalized correlation coefficient across layers.
-
-    Parameters
-    ----------
-    model_df : pd.DataFrame
-        dataframe containing model and layer information
-    params_df : pd.DataFrame
-        dataframe containing analysis parameters (n_neurons, n_procs)
-    project_root : Path
-        root directory of the project
-    height : int, default=150
-        plot height in pixels
-    width : int, default=680
-        plot width in pixels
-    ymax : float, default=0.25
-        maximum value for y-axis
-    color_pts : str, default='rgba(140, 140, 140, 1)'
-        color for data points
-    color_err : str, default='rgba(169, 169, 169, 1.0)'
-        color for error bars
-    show_mice : bool, default=True
-        whether to show individual mouse results separately
-    results_folder : str or Path or None, default=None
-        output folder for saved files; defaults to project_root / 'results_extended'
-
-    Returns
-    -------
-    None
-        saves plot as PDF files in project_root / 'results_extended' / 'cc_{n_neurons}avg_{d}dim.pdf'
-    """
-   
-    n_neurons = int(params_df.loc['n_neurons'].value)
-    d = int(params_df.loc['n_procs'].value)
-    results_folder = _resolve_results_folder(project_root, results_folder, 'results_extended')
-
-    #map layers to x-axis positions
-    area_to_x_dict = {'pixels': 0, 'V1': 1.1, 'LM': 2.1, 'RL': 3.1, 'AL': 4.1, \
-                      'TX108_V1': 0.95, 'TX108_LM': 1.95, 'TX108_RL': 2.95, 'TX108_AL': 3.95, \
-                      'TX109_V1': 1, 'TX109_LM': 2, 'TX109_RL': 3, 'TX109_AL': 4, \
-                      'TX111_V1': 1.05, 'TX111_LM': 2.05, 'TX111_RL': 3.05, 'TX111_AL': 4.05, \
-                      'conv1': 5, 'conv2': 6, 'conv3': 7, 'conv4': 8, 'conv5': 9, \
-                      }
-
-    #collect results across layers
-    performance_df = pd.DataFrame()
-    for i0 in range(model_df.shape[0]):
-        model_name = model_df['network'].values[i0]
-        layer_name = model_df['layer'].values[i0]
-        cache_folder = project_root / f'cache' / model_name
-
-        #non-gaussian noise models read/write suffixed files so they do not clobber
-        #the default gaussian caches and figures
-        noise_suffix = '' if params_df.loc['noise_model'].value == 'gaussian' else f"_{params_df.loc['noise_model'].value}"
-        equi_f = cache_folder / f'{layer_name}_equivariance_{n_neurons}avg_{d}dim{noise_suffix}.csv'
-        if not equi_f.exists():
-            continue
-        tmp_df = pd.read_csv(equi_f)
-        tmp_df['model'] = model_name
-        tmp_df['area'] = layer_name
-        performance_df = pd.concat([performance_df, tmp_df], axis=0)
-
-    #show each mouse result separately
-    if show_mice:
-        plot_mouse_df = performance_df[performance_df.model.str.startswith('TX')].copy()
-        plot_mouse_df['area'] = plot_mouse_df['model'].str[:5] + '_' + plot_mouse_df['area']
-        plot_mouse_df = plot_mouse_df.groupby(['area'])[['cc_mean']].mean().reset_index()
-        plot_mouse_df['erry'] = plot_mouse_df.groupby(['area'])['cc_mean'].std().reset_index()['cc_mean']
-        plot_mouse_df['erry'] = plot_mouse_df['erry']/np.sqrt(plot_mouse_df.groupby(['area'])['cc_mean'].count().values)
-        plot_mouse_df['erry'] = plot_mouse_df['erry'].replace(np.nan, 0)
-        plot_mouse_df['color'] = 'rgba(180, 180, 180, 1.0)'
-        plot_mouse_df['errcolor'] = 'rgba(209, 209, 209, 1.0)'
-
-    #compute mean and sem for each area
-    plot_df = performance_df.groupby(['area'])[['cc_mean']].mean().reset_index()
-    plot_df['erry'] = performance_df.groupby(['area'])['cc_mean'].std().reset_index()['cc_mean']
-    plot_df['erry'] = plot_df['erry']/np.sqrt(performance_df.groupby(['area'])['cc_mean'].count().values)
-    plot_df['erry'] = plot_df['erry'].replace(np.nan, 0)
-    plot_df['color'] = color_pts
-    plot_df['errcolor'] = color_err
-    plot_df['size'] = 8
-
-    #add individual mouse results
-    if show_mice:
-        plot_mouse_df['size'] = 5
-        plot_df = pd.concat([plot_df, plot_mouse_df[['area','cc_mean', 'color', 'errcolor', 'erry', 'size']]], axis=0).reset_index(drop=True)
-
-    # Check if there are no TX models, adjust pixels position
-    if performance_df[performance_df.model.str.startswith('TX')].empty:
-        area_to_x_dict['pixels'] = 4
-
-    #compute other variables for plotting
-    plot_df['y'] = plot_df['cc_mean']
-    plot_df['x'] = [area_to_x_dict[area] for area in plot_df['area']]
-    plot_df['xtick'] = [area_to_x_dict[area] for area in plot_df['area']]
-    plot_df.sort_values('x', inplace=True)
-    plot_df['errx'] = 0
-
-    if plot_df.empty:
-        print(f'No data found.')
-        return
-    fig = plot_points_w_errorbars(plot_df, y_dp=[0], sz=8, height=height, width=width, alpha=.6)
-    fig.update_layout(yaxis_title='CCnorm (1)')
-    tick_df = plot_df[~plot_df['area'].str.startswith('TX')]
-    fig.update_xaxes(title_standoff=0, tickvals=tick_df['xtick'].unique(), ticktext=tick_df['area'].unique())
-    fig.update_yaxes(title_standoff=0, range=[-0.05, ymax], tickvals=[0,0.1,0.2,0.3,0.4,0.5], ticktext=['0','0.1','0.2','0.3','0.4','0.5'])
-    fig.write_image(results_folder / f'cc_{n_neurons}avg_{d}dim{noise_suffix}.pdf', scale=1, engine='kaleido')
-
-
-def plot_equivariance_ccnorm_vs_dim(model_df, params_df, project_root, color_dict, height=150, width=350,
-                                    color_err='rgba(169, 169, 169, 1.0)', err_alpha=0.3, ymax=None):
-    """
-    Plot the equivariance model's predictive CCnorm as a function of the fitted
-    subspace dimension d.
-
-    Reads the per-layer sweeps written by equivariance_ccnorm_vs_dim_all and draws
-    one line per area. As in the across-neuron plots, the mouse areas and pixels are
-    drawn in one figure and the AlexNet layers in a second figure.
-
-    Parameters
-    ----------
-    model_df : pd.DataFrame
-        dataframe containing model and layer information
-    params_df : pd.DataFrame
-        dataframe containing analysis parameters (n_neurons, n_procs)
-    project_root : Path
-        root directory of the project
-    color_dict : dict
-        mapping of area/layer name to color
-    height : int, default=150
-        plot height in pixels
-    width : int, default=350
-        plot width in pixels
-    color_err : str, default='rgba(169, 169, 169, 1.0)'
-        color for error bars
-    err_alpha : float, default=0.3
-        opacity applied to the error bars (kept lower than the lines so the
-        connecting lines stay opaque while the error bars look fainter)
-    ymax : float or None, default=None
-        maximum value for y-axis; if None it is derived from the data and shared
-        across both figures
-
-    Returns
-    -------
-    None
-        saves plots as PDF files in project_root / 'results_extended':
-        'cc_vs_dim1_{n_neurons}avg_{d}dim.pdf' (mouse areas + pixels) and
-        'cc_vs_dim2_{n_neurons}avg_{d}dim.pdf' (AlexNet layers)
-    """
-    n_neurons = int(params_df.loc['n_neurons'].value)
-    d = int(params_df.loc['n_procs'].value)
-    results_folder = project_root / 'results_extended'
-    results_folder.mkdir(parents=True, exist_ok=True)
-
-    #collect results: mouse areas (+pixels) vs AlexNet layers
-    results_df1 = pd.DataFrame()
-    results_df2 = pd.DataFrame()
-    for i0 in range(model_df.shape[0]):
-        model_name = model_df['network'].values[i0]
-        layer_name = model_df['layer'].values[i0]
-        cache_folder = project_root / f'cache' / model_name
-
-        cc_f = cache_folder / f'{layer_name}_ccnorm_vs_dim_{n_neurons}avg_{d}dim.csv'
-        if not cc_f.exists():
-            continue
-        tmp_df = pd.read_csv(cc_f)
-        tmp_df['color'] = color_dict[layer_name]
-        tmp_df['model'] = model_name
-        tmp_df['area'] = layer_name
-        if model_name.startswith('TX') or (model_name == 'pixels'):
-            results_df1 = pd.concat([results_df1, tmp_df], axis=0)
-        else:
-            results_df2 = pd.concat([results_df2, tmp_df], axis=0)
-
-    if results_df1.empty and results_df2.empty:
-        print(f'No data found.')
-        return
-
-    #x-range/ticks span the actual swept dimensions (shared across both figures)
-    dmax = int(max([results_df['dim'].max() for results_df in [results_df1, results_df2] if not results_df.empty]))
-    dtick = 10 if dmax > 30 else 5
-
-    #shared y-range across both figures for comparability
-    if ymax is None:
-        ymax = 0
-        for results_df in [results_df1, results_df2]:
-            if not results_df.empty:
-                ymax = max(ymax, results_df.groupby(['dim','color'])['cc_mean'].mean().max())
-        ymax = 1.15 * ymax
-
-    #compute mean and sem for each area, one figure for mouse(+pixels), one for AlexNet
-    ct = 0
-    for results_df in [results_df1, results_df2]:
-        if results_df.empty:
-            ct += 1
-            continue
-        plot_df_all = results_df.groupby(['dim','color'])['cc_mean'].mean().reset_index()
-        plot_df_all['y'] = plot_df_all['cc_mean']
-        plot_df_all['erry'] = results_df.groupby(['dim','color'])['cc_mean'].std().reset_index()['cc_mean']
-        plot_df_all['erry'] = plot_df_all['erry']/np.sqrt(results_df.groupby(['dim','color'])['cc_mean'].count().values)
-        plot_df_all['erry'] = plot_df_all['erry'].replace(np.nan, 0)
-        plot_df_all['x'] = plot_df_all['dim']
-        plot_df_all['errx'] = 0
-        plot_df_all['errcolor'] = color_err
-        plot_df_all.sort_values('x', inplace=True)
-
-        fig = None
-        for color_i0 in plot_df_all['color'].unique():
-            plot_df = plot_df_all[plot_df_all['color']==color_i0]
-            fig0 = plot_points_w_errorbars(plot_df, lines=True, y_dp=[0], sz=6, height=height, width=width, alpha=1.0)
-            #lines were drawn opaque (alpha=1.0); make only the error bars fainter
-            err_rgba = color_err[:-4] + f'{err_alpha})'
-            fig0.data[0].error_y.color = err_rgba
-            fig0.data[0].error_x.color = err_rgba
-            if fig is None:
-                fig = fig0
-            else:
-                fig.add_trace(fig0.data[0])
-        fig.update_layout(yaxis_title='CCnorm (1)', xaxis_title='dimension (1)')
-        fig.update_yaxes(title_standoff=0, range=[-0.02, ymax], tickvals=[0, 0.1, 0.2])
-        fig.update_xaxes(title_standoff=0, range=[0, dmax+2], tickvals=np.arange(0, dmax+1, dtick))
-        if ct==0:
-            fig.write_image(results_folder / f'cc_vs_dim1_{n_neurons}avg_{d}dim.pdf', scale=1, engine='kaleido')
-        else:
-            fig.write_image(results_folder / f'cc_vs_dim2_{n_neurons}avg_{d}dim.pdf', scale=1, engine='kaleido')
-        ct += 1
+    fig.write_image(results_folder / f'dim_{n_neurons}avg_{d}dim{noise_suffix}{_overlay_tag(overlay_params_df)}.pdf', scale=1, engine='kaleido')
 
 
 def plot_example_decoder_weights(model_df, params_df, project_root, height=150, width=150, equivariant=False):
@@ -1523,7 +1423,7 @@ def plot_example_evals_abs(model_df, params_df, project_root, height=150, width=
 def plot_orientation_errors(model_df, params_df, project_root, ref_index=0, height=150, width=680, ymin=40,
                             color_pts='rgba(140, 140, 140, 1)', color_err='rgba(169, 169, 169, 1.0)',
                             equivariant=False, model=False, symb='circle', show_mice=True,
-                            results_folder=None):
+                            results_folder=None, overlay_params_df=None, alpha_faint=0.4, return_df=False):
     """
     Plot orientation decoding error across layers.
 
@@ -1563,6 +1463,8 @@ def plot_orientation_errors(model_df, params_df, project_root, ref_index=0, heig
     None
         saves plot as PDF files in project_root / 'results' / 'ori_{ref_index}ref_{n_neurons}avg{suffix}.pdf'
     """
+    if overlay_params_df is not None:   #N-overlay figures show area means only
+        show_mice = False
     n_neurons = int(params_df.loc['n_neurons'].value)
     if equivariant:
         d = int(params_df.loc['n_procs'].value)
@@ -1642,18 +1544,26 @@ def plot_orientation_errors(model_df, params_df, project_root, ref_index=0, heig
     if plot_df.empty:
         print(f'No data found.')
         return
+    if return_df:
+        return plot_df
+    if overlay_params_df is not None:
+        #semi-transparent layer at the other neuron count (same x, area means only), drawn
+        #first so the opaque params_df layer sits on top (SI N = 250 vs N = max figures)
+        over_df = plot_orientation_errors(model_df, overlay_params_df, project_root, ref_index=ref_index, equivariant=equivariant,
+                                          model=model, show_mice=False, results_folder=results_folder, return_df=True)
+        plot_df = pd.concat([_faint(over_df, alpha_faint), plot_df], ignore_index=True)
     fig = plot_points_w_errorbars(plot_df, y_dp=[90], sz=8, height=height, width=width, symb='diamond')
     fig.update_layout(yaxis_title='absolute angle estimation error (deg)')
     tick_df = plot_df[~plot_df['area'].str.startswith('TX')]
     fig.update_xaxes(title_standoff=0, tickvals=tick_df['xtick'].unique(), ticktext=tick_df['area'].unique())
     fig.update_yaxes(title_standoff=0, range=[ymin,95], tickvals=[0,45,90,180], ticktext=['0 ','45 ','90 ','180 '])
-    fig.write_image(results_folder / f'ori_{ref_index}ref_{n_neurons}avg{suffix}.pdf', scale=1, engine='kaleido')
+    fig.write_image(results_folder / f'ori_{ref_index}ref_{n_neurons}avg{suffix}{_overlay_tag(overlay_params_df)}.pdf', scale=1, engine='kaleido')
 
 
 def plot_classification_errors(model_df, params_df, project_root, C0=0.001, height=150, width=680, ymin=0.65,
                                color_pts='rgba(140, 140, 140, 1)', color_err='rgba(169, 169, 169, 1.0)',
                                equivariant=False, model=False, symb='circle', show_mice=True,
-                               results_folder=None):
+                               results_folder=None, overlay_params_df=None, alpha_faint=0.4, return_df=False):
     """
     Plot classification error across layers.
 
@@ -1693,6 +1603,8 @@ def plot_classification_errors(model_df, params_df, project_root, C0=0.001, heig
     None
         saves plot as PDF files in project_root / 'results' / 'svm_{C0}C_{n_neurons}avg{suffix}.pdf'
     """
+    if overlay_params_df is not None:   #N-overlay figures show area means only
+        show_mice = False
     n_neurons = int(params_df.loc['n_neurons'].value)
     if equivariant:
         d = int(params_df.loc['n_procs'].value)
@@ -1775,12 +1687,20 @@ def plot_classification_errors(model_df, params_df, project_root, C0=0.001, heig
     if svm_plot_df.empty:
         print(f'No data found.')
         return
+    if return_df:
+        return svm_plot_df
+    if overlay_params_df is not None:
+        #semi-transparent layer at the other neuron count (same x, area means only), drawn
+        #first so the opaque params_df layer sits on top (SI N = 250 vs N = max figures)
+        over_df = plot_classification_errors(model_df, overlay_params_df, project_root, C0=C0, equivariant=equivariant,
+                                             model=model, show_mice=False, results_folder=results_folder, return_df=True)
+        svm_plot_df = pd.concat([_faint(over_df, alpha_faint), svm_plot_df], ignore_index=True)
     fig = plot_points_w_errorbars(svm_plot_df, y_dp=[1-1/91], sz=8, height=height, width=width, alpha=.6, symb='diamond')
     fig.update_layout(yaxis_title='decoding error (1)')
     tick_df = svm_plot_df[~svm_plot_df['area'].str.startswith('TX')]
     fig.update_xaxes(title_standoff=0, tickvals=tick_df['xtick'].unique(), ticktext=tick_df['area'].unique())
     fig.update_yaxes(title_standoff=0, range=[ymin,1.03], tickvals=[0,0.5,0.7,1], ticktext=['0','0.5','0.7','1'])
-    fig.write_image(results_folder / f'svm_{C0}C_{n_neurons}avg{suffix}.pdf', scale=1, engine='kaleido')
+    fig.write_image(results_folder / f'svm_{C0}C_{n_neurons}avg{suffix}{_overlay_tag(overlay_params_df)}.pdf', scale=1, engine='kaleido')
 
 
 def plot_classification_errors_acrossstim(model_df, params_df, project_root, C0=0.001, height=150, width=680, 
@@ -3006,7 +2926,7 @@ def plot_eval(df_plot, ymax=7, sz=10, height=250, width=400):
             x=df_plot['x']
           , y=df_plot['y']
           , mode='markers'
-          , marker={"size": sz, 'color': df_plot['color']}
+          , marker={"size": sz, 'color': df_plot['color'], 'line': {'width': 0}}   #no white marker border (default)
           , showlegend=False
         ))
     
@@ -3072,10 +2992,27 @@ def plot_eval(df_plot, ymax=7, sz=10, height=250, width=400):
     return fig
 
 
+def _faint(df, alpha):
+    """Copy of a plot_df with its marker colours at opacity alpha: the semi-transparent layer of
+    the N-overlay figures (opaque params_df layer on top of a faint overlay_params_df layer, as
+    the full-space / subspace decoders of Fig 3c). plot_points_w_errorbars takes the error-bar
+    colour of the single trace from the first row, so errcolor is left untouched."""
+    out = df.copy()
+    out['color'] = [c[:c.rfind(',')] + f', {alpha})' for c in out['color']]
+    return out
+
+
+def _overlay_tag(overlay_params_df):
+    """File-name tag of an N-overlay figure ('' without overlay, '_overlay250' for 250 neurons)."""
+    return '' if overlay_params_df is None else f"_overlay{int(overlay_params_df.loc['n_neurons'].value)}"
+
+
 def plot_points_w_errorbars(df_plot, lines=False, y_dp=None, symb='circle', sz=10, height=250, width=400, \
                             highlight_first=False, highlight_last=False, alpha=0.2):
     """
-    Plot bar plots and optional line connections.
+    Plot bar plots and optional line connections. Markers have no border by default
+    (marker line width 0); only the highlight_first/highlight_last markers get a thin
+    black outline.
 
     Parameters
     ----------
@@ -3121,7 +3058,7 @@ def plot_points_w_errorbars(df_plot, lines=False, y_dp=None, symb='circle', sz=1
             , error_x=dict(type='data', array=df_plot['errx'], width=2, color=df_plot['errcolor'].values[0][:-4]+f'{alpha})')
             , error_y=dict(type='data', array=df_plot['erry'], width=2, color=df_plot['errcolor'].values[0][:-4]+f'{alpha})')
             , mode='markers+lines'
-            , marker={"size": marker_size, 'color': df_plot['color'], 'symbol': marker_symbol}
+            , marker={"size": marker_size, 'color': df_plot['color'], 'symbol': marker_symbol, 'line': {'width': 0}}
             , line={'color': df_plot['color'].values[0][:-4]+f'{alpha})', 'width': 1}
             , showlegend=False
           ))
@@ -3133,7 +3070,7 @@ def plot_points_w_errorbars(df_plot, lines=False, y_dp=None, symb='circle', sz=1
             , error_x=dict(type='data', array=df_plot['errx'], width=2, color=df_plot['errcolor'].values[0][:-4]+f'{alpha})')
             , error_y=dict(type='data', array=df_plot['erry'], width=2, color=df_plot['errcolor'].values[0][:-4]+f'{alpha})')
             , mode='markers'
-            , marker={"size": marker_size, 'color': df_plot['color'], 'symbol': marker_symbol}
+            , marker={"size": marker_size, 'color': df_plot['color'], 'symbol': marker_symbol, 'line': {'width': 0}}
             , showlegend=False
           ))
     if highlight_first:
@@ -3208,7 +3145,8 @@ def plot_points_w_errorbars(df_plot, lines=False, y_dp=None, symb='circle', sz=1
 
 
 def plot_rotation_robustness(results_dict, angles, project_root, height=150, width=680, alpha=0.4,
-                             results_folder=None):
+                             results_folder=None, colors=None, filename='rotation_robustness.pdf',
+                             yrange=(0.4, 1.03), showlegend=True):
     """Plot classification error (1 - accuracy) vs rotation angle for multiple models.
 
     Parameters
@@ -3227,12 +3165,22 @@ def plot_rotation_robustness(results_dict, angles, project_root, height=150, wid
         Transparency for lines/error bars.
     results_folder : str or Path or None, default=None
         output folder for saved files; defaults to project_root / 'results_extended'
+    colors : dict or None, default=None
+        {model_key: 'rgba(...)'} overriding the built-in AlexNet-variant colours; keys not
+        present fall back to grey. Used by the equivariant-CNN figure (eqv-c15r red /
+        eqv-c15 pink / eqv-c1 black).
+    filename : str, default='rotation_robustness.pdf'
+        output PDF name inside ``results_folder``.
+    yrange : tuple, default=(0.4, 1.03)
+        y-axis (classification error) range.
+    showlegend : bool, default=True
+        whether to draw the per-model legend (the eqv figure passes False).
 
     Returns
     -------
     fig : plotly.graph_objects.Figure
     """
-    COLORS = {
+    COLORS = colors if colors is not None else {
         'pretrained':   'rgba(100, 100, 100, 1)',
         'random':       'rgba(180, 180, 180, 1)',
         'rot-aug':      'rgba(44, 160, 44, 1)',
@@ -3254,21 +3202,27 @@ def plot_rotation_robustness(results_dict, angles, project_root, height=150, wid
         })
         fig_i = plot_points_w_errorbars(df_plot, lines=True, sz=5, height=height, width=width, alpha=alpha)
         trace = fig_i.data[0]
-        trace.marker.color = color[:-2] + str(alpha) + ')'
-        trace.line.color = color[:-2] + str(alpha) + ')'
+        faint = color[:-2] + str(alpha) + ')'
+        trace.marker.color = faint
+        trace.line.color = faint
+        # match the error bars to the line colour (plot_points_w_errorbars' own [:-4] strip
+        # mangles rgba(..., 1) strings into plotly's navy default, so override it here)
+        trace.error_y.color = faint
+        trace.error_x.color = faint
         trace.name = key
-        trace.showlegend = True
+        trace.showlegend = showlegend
         fig.add_trace(trace)
 
     fig.update_layout(
         height=height, width=width,
+        showlegend=showlegend,
         paper_bgcolor='rgba(255,255,255,255)',
         plot_bgcolor='rgba(255,255,255,0)',
         font={'size': 11, 'family': 'arial', 'color': 'black'},
         margin=dict(l=20, r=20, b=20, t=20, pad=0),
         yaxis_title='classification error (1)',
     )
-    fig.update_yaxes(title_standoff=0, range=[0.4, 1.03],
+    fig.update_yaxes(title_standoff=0, range=list(yrange),
                      showline=True, showgrid=False, linewidth=0.5,
                      linecolor='black', mirror=True, ticks='outside',
                      ticklen=2, tickwidth=0.5,
@@ -3281,7 +3235,7 @@ def plot_rotation_robustness(results_dict, angles, project_root, height=150, wid
                      tickfont={'size': 10, 'family': 'arial', 'color': 'black'})
 
     results_folder = _resolve_results_folder(project_root, results_folder, 'results_extended')
-    fig.write_image(results_folder / 'rotation_robustness.pdf', scale=1, engine='kaleido')
+    fig.write_image(results_folder / filename, scale=1, engine='kaleido')
     return fig
 
 
@@ -3331,8 +3285,11 @@ def plot_orientation_robustness(results_dict, angles, project_root, height=150, 
         })
         fig_i = plot_points_w_errorbars(df_plot, lines=True, sz=5, height=height, width=width, alpha=alpha)
         trace = fig_i.data[0]
-        trace.marker.color = color[:-2] + str(alpha) + ')'
-        trace.line.color = color[:-2] + str(alpha) + ')'
+        faint = color[:-2] + str(alpha) + ')'
+        trace.marker.color = faint
+        trace.line.color = faint
+        trace.error_y.color = faint
+        trace.error_x.color = faint
         trace.name = key
         trace.showlegend = True
         fig.add_trace(trace)
@@ -3537,7 +3494,7 @@ def plot_hist_lines(df, val, col, hist_bins, color_df, height=400, width=500, no
             hist_counts = hist_counts / hist_counts.sum()
         hist_df = pd.DataFrame({'bin': (hist_bins[:-1]+hist_bins[1:])/2, 'count': hist_counts})
         fig.add_trace(go.Scatter(x=hist_df['bin'], y=hist_df['count'], mode='markers+lines', name=str(group), \
-                                marker=dict(color=color_df.loc[group,'color']),
+                                marker=dict(color=color_df.loc[group,'color'], line=dict(width=0)),   #no white marker border (default)
                                 line=dict(color=color_df.loc[group,'color'])))
     fig.update_layout(
         font=dict(family='arial', size=11, color='black')
@@ -3574,7 +3531,7 @@ def plot_hist_lines(df, val, col, hist_bins, color_df, height=400, width=500, no
               'size': 10
             , 'family': 'arial'
             , 'color': 'black'
-          } 
+          }
     )
-    
+
     return fig

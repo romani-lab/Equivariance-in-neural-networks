@@ -1,5 +1,6 @@
 # Task 1: Classification with circular masks
 name: classification
+backbone: alexnet  # 'alexnet' (default) | 'eqv_c15' | 'eqv_c15_restricted' | 'eqv_c1' (built-in rotation equivariance; needs escnn)
 use_rotation_aug: false
 use_circular_mask: true
 rotation_quantization: null  # if set (e.g., 24), quantize rotation angles

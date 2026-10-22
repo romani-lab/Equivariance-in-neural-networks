@@ -1,0 +1,8 @@
+name,value,description
+stimulus,stim_05-08-23,Stimulus set identifier (name of the stimulus file)
+corr_thre,0.1,Split-half correlation threshold for selecting reliably responsive neurons
+n_procs,20,Dimensionality of the equivariant subspace projection used for decoding
+n_neurons,250,Number of neurons randomly subsampled per draw
+inv_snr,0,Inverse signal-to-noise ratio; 0 = noiseless clean limit (see noise_model=noiseless)
+n_max,100,Maximum number of random neuron subsamples per condition
+noise_model,noiseless,"Noise model: noiseless clean limit; caches get a _noiseless suffix so they do not collide with the gaussian inv_snr=3.9 caches"

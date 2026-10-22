@@ -51,8 +51,14 @@ class FeatureExtractor:
         self._transform = self._build_transform(cfg)
 
     @staticmethod
-    def _build_model(cfg: dict) -> AlexNet:
+    def _build_model(cfg: dict):
         """Reconstruct model from checkpoint config."""
+        # CNNs with built-in rotation equivariance (SI Fig 6; classification only).
+        backbone = cfg.get("backbone", "alexnet")
+        if backbone.startswith("eqv_c"):
+            from more_anns.equivariant_models import build_equivariant_alexnet
+            return build_equivariant_alexnet(backbone, num_classes=cfg.get("num_classes", 1000))
+
         is_classification = "angle_representation" not in cfg
 
         if is_classification:
